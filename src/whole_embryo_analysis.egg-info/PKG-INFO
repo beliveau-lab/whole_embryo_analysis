@@ -1,0 +1,27 @@
+Metadata-Version: 2.4
+Name: whole_embryo_analysis
+Version: 0.1.0
+Summary: Analysis and visualization for whole-embryo light sheet data
+License: LICENSE
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: zarr
+Requires-Dist: dask[array]
+Requires-Dist: matplotlib
+Requires-Dist: scipy
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Provides-Extra: viz
+Requires-Dist: pyvista; extra == "viz"
+Requires-Dist: plotly; extra == "viz"
+Requires-Dist: colorcet; extra == "viz"
+Requires-Dist: polars; extra == "viz"
+Provides-Extra: cluster
+Requires-Dist: dask-jobqueue; extra == "cluster"
+Requires-Dist: distributed; extra == "cluster"
+Dynamic: license-file
+
+# whole_embryo_analysis

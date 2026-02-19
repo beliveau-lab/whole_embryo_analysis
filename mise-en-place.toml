@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whole_embryo_analysis"
+version = "0.1.0"
+description = "Analysis and visualization for whole-embryo light sheet data"
+readme = "README.md"
+license = { text = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "pandas",
+    "zarr",
+    "dask[array]",
+    "matplotlib",
+    "scipy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+viz = ["pyvista", "plotly", "colorcet", "polars"]
+cluster = ["dask-jobqueue", "distributed"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["whole_embryo_analysis*"]
