@@ -74,9 +74,7 @@ def build_anatomical_frame(somite_mask, somite_lut,
 
 
 def build_frenet_frame(spline_csv_path, smoothing=2.0):
-    logger.warning("Frenet frame uses geometric N/B axes — not recommended for chirality")
     frame = compute_frenet_from_csv(spline_csv_path, smoothing=smoothing)
-    logger.info(f"Frenet frame built: {len(frame.u_dense)} evaluation points")
     return frame
 
 

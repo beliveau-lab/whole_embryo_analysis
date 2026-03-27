@@ -228,75 +228,75 @@ def run_analysis(args, save_visualization=True):
 
     nuclear_df_all = join_somite_metadata(nuclear_df_all, somite_lut_pl)
 
-    # if pc_metadata is not None:
-    #     nuclear_df_all = join_pc_metadata(nuclear_df_all, pc_metadata)
+    if pc_metadata is not None:
+        nuclear_df_all = join_pc_metadata(nuclear_df_all, pc_metadata)
 
-    # if args.get('test_somites'):
-    #     nuclear_df_all = filter_by_test_somites(nuclear_df_all, args['test_somites'])
+    if args.get('test_somites'):
+        nuclear_df_all = filter_by_test_somites(nuclear_df_all, args['test_somites'])
 
-    # nuclear_mask = load_n5_zarr_array(args['nuclear_mask_path'])
-    # bbox_df = pl.read_csv(args['bbox_path'])
-    # bbox_df = add_chunk_indices(bbox_df, nuclear_mask.chunks)
+    nuclear_mask = load_n5_zarr_array(args['nuclear_mask_path'])
+    bbox_df = pl.read_csv(args['bbox_path'])
+    bbox_df = add_chunk_indices(bbox_df, nuclear_mask.chunks)
 
-    # all_somite_dfs = []
-    # completed_somite_ids = set()
+    all_somite_dfs = []
+    completed_somite_ids = set()
 
-    # if resume:
-    #     checkpoint_df, completed_somite_ids = load_checkpoint(save_dir, csv_name)
-    #     if checkpoint_df is not None:
-    #         all_somite_dfs = [checkpoint_df]
-    #         logger.info(f"Resuming: {len(completed_somite_ids)} somites already done")
+    if resume:
+        checkpoint_df, completed_somite_ids = load_checkpoint(save_dir, csv_name)
+        if checkpoint_df is not None:
+            all_somite_dfs = [checkpoint_df]
+            logger.info(f"Resuming: {len(completed_somite_ids)} somites already done")
 
-    # analyzer = somite_analysis.SomiteAnalyzer(nuclear_mask, bbox_df, dask_params)
-    # unique_ids = nuclear_df_all['Somite_ID'].unique().to_list()
-    # to_process = [sid for sid in unique_ids if str(sid) not in completed_somite_ids]
+    analyzer = somite_analysis.SomiteAnalyzer(nuclear_mask, bbox_df, dask_params)
+    unique_ids = nuclear_df_all['Somite_ID'].unique().to_list()
+    to_process = [sid for sid in unique_ids if str(sid) not in completed_somite_ids]
 
-    # logger.info(f"Processing {len(to_process)} somites ({len(completed_somite_ids)} already done)")
+    logger.info(f"Processing {len(to_process)} somites ({len(completed_somite_ids)} already done)")
 
-    # try:
-    #     if not analyzer.setup():
-    #         raise RuntimeError("Failed to setup Dask cluster")
+    try:
+        if not analyzer.setup():
+            raise RuntimeError("Failed to setup Dask cluster")
 
-    #     for i, somite_id in enumerate(to_process):
-    #         logger.info(f"Somite {i+1}/{len(to_process)}: {somite_id}")
+        for i, somite_id in enumerate(to_process):
+            logger.info(f"Somite {i+1}/{len(to_process)}: {somite_id}")
 
-    #         somite_df = filter_nuclei_by_somite_id(nuclear_df_all, somite_id)
-    #         if len(somite_df) == 0:
-    #             completed_somite_ids.add(str(somite_id))
-    #             continue
+            somite_df = filter_nuclei_by_somite_id(nuclear_df_all, somite_id)
+            if len(somite_df) == 0:
+                completed_somite_ids.add(str(somite_id))
+                continue
 
-    #         somite_df, local_frames = somite_analysis.compute_biological_positions(somite_df, frame)
-    #         somite_df = somite_analysis.add_depth(somite_df, somite_mask, somite_id)
+            somite_df, local_frames = somite_analysis.compute_biological_positions(somite_df, frame)
+            somite_df = somite_analysis.add_depth(somite_df, somite_mask, somite_id)
 
-    #         orient_df = analyzer.process_somite(somite_df, local_frames)
-    #         if not orient_df.is_empty():
-    #             somite_df = somite_df.join(orient_df, on='Nuclear_ID', how='left')
-    #         else:
-    #             logger.warning(f"No orientation features for somite {somite_id}")
+            orient_df = analyzer.process_somite(somite_df, local_frames)
+            if not orient_df.is_empty():
+                somite_df = somite_df.join(orient_df, on='Nuclear_ID', how='left')
+            else:
+                logger.warning(f"No orientation features for somite {somite_id}")
 
-    #         all_somite_dfs.append(somite_df)
-    #         completed_somite_ids.add(str(somite_id))
+            all_somite_dfs.append(somite_df)
+            completed_somite_ids.add(str(somite_id))
 
-    #         if (i + 1) % checkpoint_interval == 0:
-    #             save_checkpoint(all_somite_dfs, completed_somite_ids, save_dir, csv_name)
+            if (i + 1) % checkpoint_interval == 0:
+                save_checkpoint(all_somite_dfs, completed_somite_ids, save_dir, csv_name)
 
-    # except Exception as e:
-    #     logger.error(f"Interrupted: {e}")
-    #     save_checkpoint(all_somite_dfs, completed_somite_ids, save_dir, csv_name)
-    #     raise
-    # finally:
-    #     analyzer.shutdown()
+    except Exception as e:
+        logger.error(f"Interrupted: {e}")
+        save_checkpoint(all_somite_dfs, completed_somite_ids, save_dir, csv_name)
+        raise
+    finally:
+        analyzer.shutdown()
 
-    # if all_somite_dfs:
-    #     final_df = pl.concat(all_somite_dfs)
-    #     save_path = Path(save_dir) / f'{csv_name}.csv'
-    #     final_df.write_csv(save_path)
-    #     logger.info(f"Saved {len(final_df)} nuclei to {save_path}")
-    #     cleanup_checkpoint(save_dir, csv_name)
-    #     return final_df
-    # else:
-    #     logger.warning("No data to save")
-    #     return pl.DataFrame()
+    if all_somite_dfs:
+        final_df = pl.concat(all_somite_dfs)
+        save_path = Path(save_dir) / f'{csv_name}.csv'
+        final_df.write_csv(save_path)
+        logger.info(f"Saved {len(final_df)} nuclei to {save_path}")
+        cleanup_checkpoint(save_dir, csv_name)
+        return final_df
+    else:
+        logger.warning("No data to save")
+        return pl.DataFrame()
 
 
 if __name__ == "__main__":

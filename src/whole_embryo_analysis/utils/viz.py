@@ -18,10 +18,24 @@ def save_vectorized(
     dir_path: Union[str, Path, None],
     fig: "plt.Figure",
     plot_name: str,
-    *,
-    transparent: bool = False,
+    transparent: bool = True,
 ) -> None:
     """Save figure as SVG; create directory if needed. If dir_path is None, show instead."""
+    text_color = "white" if transparent else "black"
+    for ax in fig.get_axes():
+        ax.xaxis.label.set_color(text_color)
+        ax.yaxis.label.set_color(text_color)
+        ax.title.set_color(text_color)
+        ax.tick_params(colors=text_color, which="both")
+        for spine in ax.spines.values():
+            spine.set_edgecolor(text_color)
+        if ax.get_legend():
+            ax.get_legend().get_frame().set_edgecolor(text_color)
+            for text in ax.get_legend().get_texts():
+                text.set_color(text_color)
+    for text in fig.texts:
+        text.set_color(text_color)
+
     output_path = Path(dir_path) if dir_path else None
     if output_path:
         output_path.mkdir(parents=True, exist_ok=True)
@@ -31,8 +45,6 @@ def save_vectorized(
             format="svg",
             bbox_inches="tight",
             transparent=transparent,
-            facecolor=None if transparent else "white",
-            edgecolor="white" if transparent else "black",
         )
         logger.info("Saved plot: %s", out_file)
     else:

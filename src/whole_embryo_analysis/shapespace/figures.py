@@ -36,26 +36,27 @@ def mesh_viz_small(shapespace):
     fixed_position = [fixed_pos, fixed_pos, fixed_pos]
     fixed_focal_point = [0, 0, 0]
     num_pcs = shapespace.num_pcs
-    plotter = pv.Plotter(shape=(num_pcs, len(sigma_steps_desired)), 
+    num_cols = len(sigma_steps_desired)
+    plotter = pv.Plotter(shape=(num_pcs, num_cols), 
                     window_size=(2000, 1000), 
                     off_screen=True,
+                    border=True,
+                    border_color='black',
+                    border_width=2,
                     lighting='three_lights')
     for pc in range(1, num_pcs+1):
         pc_key = f"PC{pc}"
-        col_index = 0  # Track column index separately
+        col_index = 0
         for s_index, sigma in enumerate(shapespace.sigma_steps):
             if sigma.is_integer():
                 mesh = pv.read(f"{shapespace.save_path}/meshes/{pc_key}_vtks/{pc_key}_{sigma}.vtk")
-            # mesh = shapespace.meshes[pc_key][s_index]
                 plotter.subplot(pc-1, col_index)
                 plotter.add_mesh(mesh, color='steelblue')
                 plotter.camera.position = fixed_position
                 plotter.camera.focal_point = fixed_focal_point 
-                col_index += 1  # Only increment when we actually add a mesh
-            else:
-                continue
+                col_index += 1
     if shapespace.store_results:
-        plotter.save_graphic(f"{shapespace.save_path}/reconstruction_viz_small.svg")
+        plotter.screenshot(f"{shapespace.save_path}/reconstruction_viz_small.png", transparent_background=True)
     else: 
         plotter.show()
     return plotter
@@ -65,21 +66,24 @@ def mesh_visualization(shapespace):
     fixed_position = [fixed_pos, fixed_pos, fixed_pos]
     fixed_focal_point = [0, 0, 0]
     num_pcs = shapespace.num_pcs
-    plotter = pv.Plotter(shape=(num_pcs, len(shapespace.sigma_steps)), 
+    num_cols = len(shapespace.sigma_steps)
+    plotter = pv.Plotter(shape=(num_pcs, num_cols), 
                     window_size=(2000, 1000), 
                     off_screen=True,
+                    border=True,
+                    border_color='white',
+                    border_width=2,
                     lighting='three_lights')
     for pc in range(1, num_pcs+1):
         pc_key = f"PC{pc}"
         for s_index, _ in enumerate(shapespace.sigma_steps):
-            # mesh = pv.read(f"{mesh_path}/{pc_key}_vtks/{pc_key}_{shapespace.sigma_steps[s_index]}.vtk")
             mesh = shapespace.meshes[pc_key][s_index]
             plotter.subplot(pc-1, s_index)
             plotter.add_mesh(mesh, color='steelblue')
             plotter.camera.position = fixed_position
             plotter.camera.focal_point = fixed_focal_point 
     if shapespace.store_results:
-        plotter.save_graphic(f"{shapespace.save_path}/reconstruction_viz.svg")
+        plotter.screenshot(f"{shapespace.save_path}/reconstruction_viz.png", transparent_background=True)
     else: 
         plotter.show()
 
@@ -156,9 +160,10 @@ def pc_histograms(shapespace, font_size=10):
     plt.subplots_adjust(left=0.15)  # Make room for the y-axis label
     if shapespace.store_results:
         save_vectorized(
-            dir=shapespace.save_path,
+            dir_path=shapespace.save_path,
             fig=fig,
-            plot_name=f"shp_histogram"
+            plot_name=f"shp_histogram",
+            transparent=True
         )
     else:
         plt.show()
@@ -183,40 +188,39 @@ def variance_explained(shapespace, font_size=10):
             ax[pc].set_xlabel("Variance Explained (%)", fontsize=font_size)
     if shapespace.store_results:
         save_vectorized(
-            dir=shapespace.save_path,
+            dir_path=shapespace.save_path,
             fig=fig,
-            plot_name=f"variance_explained"
+            plot_name=f"variance_explained",
+            transparent=True
         )
     else:
         plt.show()
 
-def plot_scree(shapespace, font_size=18, n_components=25):
+def plot_scree(shapespace, font_size=10, n_components=15):
     sh_matrix = shapespace.shcoeffs_df.values
     pca_full = PCA(n_components=n_components, svd_solver='full')
     pca_full.fit(sh_matrix)
     cumulative_variance = np.cumsum(pca_full.explained_variance_ratio_)
     var_explained_chose = shapespace.pca.explained_variance_ratio_.sum()
-    fig, ax = plt.subplots(figsize=(6, 8)) 
-    ax.plot(cumulative_variance,    
-            range(1, len(cumulative_variance) + 1), 
+    fig, ax = plt.subplots(figsize=(4, 3)) 
+    ax.plot(range(1, len(cumulative_variance) + 1), 
+            cumulative_variance,    
             'o-', 
             linewidth=2, 
-            markersize=8,
+            markersize=6,
             color='steelblue')
-    
-    ax.axhline(y=shapespace.num_pcs, color='red', linestyle='--', 
-               label=f'Chosen: {shapespace.num_pcs} PCs')
+    ax.axvline(x=shapespace.num_pcs, color='red', linestyle='--', 
+               label=f'{shapespace.num_pcs} PCs')
     ax.grid(True)
     ax.legend(loc='best', fontsize=font_size)
-    ax.set_xlabel('Var Explained (%)', fontsize=font_size)
+    ax.set_xlabel('# of PCs', fontsize=font_size)
     ax.set_title(f'Total Variance Explained: {var_explained_chose:.2f}%', fontsize=font_size)
-    ax.set_xlim(cumulative_variance[0] - 0.05, 1.0)
-    ax.set_ylim(0, len(cumulative_variance) + 1)
-    ax.invert_yaxis()
-    ax.set_ylabel("# of PCs", rotation=45, fontsize=font_size)
+    ax.set_xlim(0, len(cumulative_variance) + 1)
+    ax.set_ylim(cumulative_variance[0] - 0.05, 1.0)
+    ax.set_ylabel("% Explained", rotation=90, fontsize=font_size)
     ax.tick_params(axis='both', which='major', labelsize=font_size)
     if shapespace.store_results:
-        save_vectorized(dir=shapespace.save_path, fig=fig, plot_name='pca_scree_plot')
+        save_vectorized(dir_path=shapespace.save_path, fig=fig, plot_name='pca_scree_plot', transparent=True)
     else:
         plt.show()
     

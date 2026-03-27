@@ -538,11 +538,12 @@ def plot_frame_3d(frame, somite_centroids=None, n_frames=20, scale=1.0, title=No
         mode="lines", line=dict(color="purple", width=4, dash="dash"),
         name="Midline / Neural tube",
     ))
-    fig.add_trace(go.Scatter3d(
-        x=frame.midpoints[:, 2], y=frame.midpoints[:, 1], z=frame.midpoints[:, 0],
-        mode="markers", marker=dict(size=5, color="gray"),
-        name="L/R midpoints",
-    ))
+    if hasattr(frame, 'midpoints'):
+        fig.add_trace(go.Scatter3d(
+            x=frame.midpoints[:, 2], y=frame.midpoints[:, 1], z=frame.midpoints[:, 0],
+            mode="markers", marker=dict(size=5, color="gray"),
+            name="L/R midpoints",
+        ))
 
     if somite_centroids is not None:
         sc = np.asarray(somite_centroids)

@@ -82,13 +82,13 @@ def main():
     # full_path = '/net/beliveau/vol2/instrument/E9.5_306/Zoom_306/dataset_fused_features_postprocessed.csv'
     # full_path = '/net/beliveau/vol2/instrument/E9.5_306/Zoom_306/dataset_fused_features_postprocessed_newclasslabels.csv'
     # outlier_path = '/net/beliveau/vol2/instrument/E9.5_306/Zoom_306/outliers_postprocessed.csv'
-    full_path = '/net/beliveau/vol2/instrument/E9.5_306/Zoom_306/dataset_fused_features_skew_alignment.csv'
+    full_path = '/net/beliveau/vol2/instrument/E9.5_306/Zoom_306/dataset_fused_features_Julia_FT_Feb26.csv'
     outlier_path = None
-    save_dir = '/net/beliveau/vol1/home/msforman/msf_project/whole_embryo_analysis/figures/'
+    save_dir = '/net/beliveau/vol2/instrument/E9.5_306/Zoom_306/'
     (
     run_global(
         full_path, outlier_path, save_dir, 
-        id_name='label', str_tag='Global_Skew_test', store_results=True, 
+        id_name='Nuclear_ID', str_tag='Julia_FT_Feb26', store_results=True, 
         generate_figures=True
         )
     )

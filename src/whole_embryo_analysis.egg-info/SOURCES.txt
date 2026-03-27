@@ -3,6 +3,7 @@ README.md
 pyproject.toml
 src/whole_embryo_analysis/__init__.py
 src/whole_embryo_analysis/align_3d.py
+src/whole_embryo_analysis/somite_nuclei_map.py
 src/whole_embryo_analysis/validate_lmax.py
 src/whole_embryo_analysis.egg-info/PKG-INFO
 src/whole_embryo_analysis.egg-info/SOURCES.txt
@@ -19,7 +20,9 @@ src/whole_embryo_analysis/somite_analysis/__init__.py
 src/whole_embryo_analysis/somite_analysis/align_bases.py
 src/whole_embryo_analysis/somite_analysis/bio_frame.py
 src/whole_embryo_analysis/somite_analysis/clustering_helpers.py
+src/whole_embryo_analysis/somite_analysis/curvature.py
 src/whole_embryo_analysis/somite_analysis/feature_extract.py
+src/whole_embryo_analysis/somite_analysis/interactive_plots.py
 src/whole_embryo_analysis/somite_analysis/somite_analysis.py
 src/whole_embryo_analysis/somite_analysis/temp.py
 src/whole_embryo_analysis/utils/__init__.py
@@ -27,6 +30,6 @@ src/whole_embryo_analysis/utils/dask_utils.py
 src/whole_embryo_analysis/utils/io.py
 src/whole_embryo_analysis/utils/madi_utils.py
 src/whole_embryo_analysis/utils/mesh_metrics.py
-src/whole_embryo_analysis/utils/resolution_conversion.py
+src/whole_embryo_analysis/utils/scale_resolution.py
 src/whole_embryo_analysis/utils/viz.py
 src/whole_embryo_analysis/utils/xml_utils.py
