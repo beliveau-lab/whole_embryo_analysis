@@ -10,6 +10,78 @@ import psutil
 
 logger = logging.getLogger(__name__)
 
+# Default Dask-JobQueue cluster settings (can be overridden per-script)
+DASK_DEFAULTS = {
+    "workers": 1,
+    "memory": "8G",
+    "cores": 5,
+    "processes": 1,
+    "project": "beliveaulab",
+    "queue": "beliveau-long.q",
+    "runtime": "7200",
+    "resource_spec": "mfree=8G",
+    "conda_env": "otls-pipeline",
+    "dashboard_port": ":41236",
+    "log_dir": None,
+}
+
+
+def add_dask_args(parser, defaults=None):
+    """
+    Add --dask_* CLI arguments to an argparse parser.
+
+    Args:
+        parser: argparse.ArgumentParser instance
+        defaults: dict overriding DASK_DEFAULTS for this script
+    """
+    d = {**DASK_DEFAULTS, **(defaults or {})}
+    parser.add_argument("--dask_workers", type=int, default=d["workers"],
+                        help="Number of Dask SGE workers")
+    parser.add_argument("--dask_memory", type=str, default=d["memory"],
+                        help="Memory per Dask worker (e.g. '8G')")
+    parser.add_argument("--dask_cores", type=int, default=d["cores"],
+                        help="CPU cores per Dask worker")
+    parser.add_argument("--dask_processes", type=int, default=d["processes"],
+                        help="Processes per Dask worker job")
+    parser.add_argument("--dask_project", type=str, default=d["project"],
+                        help="SGE project code")
+    parser.add_argument("--dask_queue", type=str, default=d["queue"],
+                        help="SGE queue name")
+    parser.add_argument("--dask_runtime", type=str, default=d["runtime"],
+                        help="SGE walltime (seconds or HH:MM:SS)")
+    parser.add_argument("--dask_resource_spec", type=str, default=d["resource_spec"],
+                        help="SGE resource specification (e.g. 'mfree=8G')")
+    parser.add_argument("--dask_conda_env", type=str, default=d["conda_env"],
+                        help="Conda environment for Dask workers")
+    parser.add_argument("--dask_dashboard_port", type=str, default=d["dashboard_port"],
+                        help="Dask dashboard port")
+    parser.add_argument("--dask_log_dir", type=str, default=d["log_dir"],
+                        help="Directory for Dask worker logs")
+
+
+def dask_config_from_args(args):
+    """
+    Build the Dask-JobQueue config dict from parsed CLI args.
+
+    Accepts either a Namespace or a dict (from vars(args)).
+    Returns a dict with the keys expected by setup_dask_sge_cluster
+    and SomiteAnalyzer.
+    """
+    if not isinstance(args, dict):
+        args = vars(args)
+    return {
+        "num_workers": args["dask_workers"],
+        "cpu_memory": args["dask_memory"],
+        "cpu_cores": args["dask_cores"],
+        "cpu_processes": args["dask_processes"],
+        "cpu_resource_spec": args["dask_resource_spec"],
+        "project": args["dask_project"],
+        "queue": args["dask_queue"],
+        "runtime": args["dask_runtime"],
+        "log_dir": args.get("dask_log_dir"),
+        "conda_env": args["dask_conda_env"],
+        "dashboard_port": args["dask_dashboard_port"],
+    }
 
 
 def setup_dask_sge_cluster(

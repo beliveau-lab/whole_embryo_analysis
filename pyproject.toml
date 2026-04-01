@@ -12,16 +12,24 @@ requires-python = ">=3.9"
 dependencies = [
     "numpy",
     "pandas",
+    "polars",
     "zarr",
     "dask[array]",
     "matplotlib",
     "scipy",
+    "scikit-learn",
+    "seaborn",
+    "tifffile",
+    "aicsshparam",
+    "colorcet",
+    "dask-jobqueue",
+    "distributed",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
-viz = ["pyvista", "plotly", "colorcet", "polars"]
-cluster = ["dask-jobqueue", "distributed"]
+viz = ["pyvista", "plotly"]
+workflow = ["snakemake"]
 
 [tool.setuptools.package-dir]
 "" = "src"

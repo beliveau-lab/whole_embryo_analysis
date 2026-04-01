@@ -4,3 +4,5 @@ notebooks/
 STRUCTURE.md
 temp/
 figures/
+dask_worker_logs*/
+.snakemake/

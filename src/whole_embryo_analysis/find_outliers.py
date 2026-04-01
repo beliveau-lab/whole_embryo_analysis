@@ -13,7 +13,9 @@ from scipy.stats import gaussian_kde
 from sklearn.utils import resample
 
 from dask import delayed
-from utils.dask_utils import setup_dask_sge_cluster, shutdown_dask
+from whole_embryo_analysis.utils.dask_utils import (
+    setup_dask_sge_cluster, shutdown_dask, add_dask_args, dask_config_from_args,
+)
 
 print("Finished imports")
 logging.basicConfig(
@@ -71,13 +73,12 @@ def compute_median_density(metric_x,
 
 class KDEOutlierDetection:
     def __init__(self, params):
-        self.log_dir = "/net/beliveau/vol1/home/msforman/msf_project/lightsheet-analysis-pipeline/logs/analysis"
-        self.figure_dir = params["figure_dir"] # directory to store figures
-        self.density_thresh = params["density_thresh"] # KDE density threshold
-        self.csv_path = params["csv_path"] # path to original csv
-        self.outlier_path = params["outlier_path"] # path to save outlier csv to
-        self.n_subsample = params["n_subsample"] # size of monte carlo subsample
-        self.n_rounds = params["n_rounds"] # number of rounds to estimate density
+        self.figure_dir = params["figure_dir"]
+        self.density_thresh = params["density_thresh"]
+        self.csv_path = params["csv_path"]
+        self.outlier_path = params["outlier_path"]
+        self.n_subsample = params["n_subsample"]
+        self.n_rounds = params["n_rounds"]
 
         self.df = None # df of original csv
         self.df_plot = None # df of plotting data
@@ -315,23 +316,23 @@ def _shutdown_dask(cluster, client):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="KDE Outlier Detection (Dask-parallel)")
-    parser.add_argument("--density_thresh", type=float, default=1e-15,
-                        help="Density threshold at which to consider an outlier")
-    parser.add_argument("--figure_dir", type=str, required=True,
-                        help="Directory to store figures. Will be created if not exists")
     parser.add_argument("--csv_path", type=str, required=True,
                         help="CSV file with single cell data")
+    parser.add_argument("--figure_dir", type=str, required=True,
+                        help="Directory to store figures. Will be created if not exists")
     parser.add_argument("--outlier_path", type=str, required=True,
                         help="Where to store csv file of outliers")
+    parser.add_argument("--density_thresh", type=float, default=1e-15,
+                        help="Density threshold at which to consider an outlier")
     parser.add_argument("--n_subsample", type=int, default=10000,
                         help="Size of subsample in Monte Carlo subsampling")
     parser.add_argument("--n_rounds", type=int, default=5,
                         help="Num of rounds in KDE")
+    add_dask_args(parser)
     return parser.parse_args()
 
 
 def main():
-    use_dask = True
     args = parse_args()
     params = {
         "figure_dir": args.figure_dir,
@@ -350,26 +351,10 @@ def main():
     detector = KDEOutlierDetection(params)
     cluster = client = None
     try:
-        if use_dask:
-            dask_params = {
-                "num_workers": 1,
-                "cpu_memory": "8G",
-                "cpu_cores": 5,
-                "cpu_processes": 1,
-                "project": "beliveaulab",
-                "queue": "beliveau-long.q",
-                "runtime": 7200,
-                "cpu_resource_spec": "mfree=8G",
-                "log_dir": detector.log_dir,
-                "conda_env": "otls-pipeline",
-                "dashboard_port": ":41236",
-            }
-            cluster, client = _setup_dask(dask_params)
-            logger.info(f"Dask dashboard: {client.dashboard_link}")
-            detector.workflow(client)
-        else:
-            print("Failed to setup dask cluster.")
-            return 
+        dask_params = dask_config_from_args(args)
+        cluster, client = _setup_dask(dask_params)
+        logger.info(f"Dask dashboard: {client.dashboard_link}")
+        detector.workflow(client)
 
     finally:
         _shutdown_dask(cluster, client)

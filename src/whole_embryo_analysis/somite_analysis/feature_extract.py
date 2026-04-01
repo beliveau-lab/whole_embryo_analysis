@@ -9,6 +9,7 @@ import tifffile
 
 from whole_embryo_analysis.somite_analysis import somite_analysis
 from whole_embryo_analysis.utils.io import load_n5_zarr_array, add_chunk_indices
+from whole_embryo_analysis.utils.dask_utils import add_dask_args, dask_config_from_args
 
 logger = logging.getLogger(__name__)
 
@@ -88,24 +89,6 @@ def filter_by_test_somites(nuclear_df, test_somites):
 # Configuration
 # =============================================================================
 
-def dask_config():
-    return {
-        "num_workers": 1,
-        "cpu_memory": "32G",
-        "cpu_cores": 5,
-        "cpu_processes": 5,
-        "cpu_resource_spec": "mfree=64G",
-        "use_dask": True,
-        "conda_env": "visualization",
-        "project": "beliveaulab",
-        "queue": "beliveau-long.q",
-        "runtime": "43200",
-        "log_dir": '/net/beliveau/vol1/home/msforman/msf_project/lightsheet-analysis-pipeline/logs/analysis/somites_dask/',
-        "save_dir": '/net/beliveau/vol2/instrument/E9.5_306/Zoom_306/figures/',
-        "dashboard_port": ":41263",
-    }
-
-
 def parse_args():
     parser = argparse.ArgumentParser()
 
@@ -123,6 +106,17 @@ def parse_args():
     parser.add_argument("--spline_csv_path", type=str, default=None)
     parser.add_argument("--test_somites", type=str, default=None)
     parser.add_argument("--csv_name", type=str, default='all_somite_nuclear_features')
+    parser.add_argument("--embryo_id", type=int, required=True)
+
+
+    add_dask_args(parser, defaults={
+        "memory": "32G",
+        "processes": 5,
+        "runtime": "43200",
+        "resource_spec": "mfree=64G",
+        "conda_env": "visualization",
+        "dashboard_port": ":41263",
+    })
 
     return vars(parser.parse_args())
 
@@ -203,7 +197,7 @@ def _build_frame(frame_type, args, somite_mask, somite_lut_pl):
 # =============================================================================
 
 def run_analysis(args, save_visualization=True):
-    dask_params = args.get('dask_params', dask_config())
+    dask_params = args.get('dask_params', {})
     resume = False
     checkpoint_interval = 5
     csv_name = args.get('csv_name', 'all_somite_nuclear_features')
@@ -212,6 +206,7 @@ def run_analysis(args, save_visualization=True):
 
     somite_mask = tifffile.imread(args['somite_mask_path'])
     somite_lut_pl = pl.read_csv(args['somite_lut_path'])
+    somite_lut_pl = somite_lut_pl.filter(pl.col('Embryo_ID') == args['embryo_id'])
 
     pc_metadata = None
     if args.get('pc_metadata_path'):
@@ -302,6 +297,6 @@ def run_analysis(args, save_visualization=True):
 if __name__ == "__main__":
     start_time = time.time()
     args = parse_args()
-    args['dask_params'] = dask_config()
+    args['dask_params'] = dask_config_from_args(args)
     run_analysis(args)
     logger.info(f"Completed in {time.time() - start_time:.1f}s")

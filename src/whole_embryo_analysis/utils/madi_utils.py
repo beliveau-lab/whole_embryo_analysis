@@ -19,7 +19,7 @@ import logging
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
-from align_3d import (
+from whole_embryo_analysis.align_3d import (
     zyx_to_xyz, align_object_standard
     )
 
