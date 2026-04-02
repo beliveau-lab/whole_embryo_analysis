@@ -502,6 +502,8 @@ def plot_anatomical_frame(frame, ax=None, n_frames=20, scale=50.0, title=None):
     if ax is None:
         fig = plt.figure(figsize=(12, 10))
         ax = fig.add_subplot(111, projection='3d')
+    else:
+        fig = ax.get_figure()
 
     curve = frame.curve_dense
     ax.plot(curve[:, 2], curve[:, 1], curve[:, 0],
@@ -599,6 +601,8 @@ def plot_frenet_frame(frame, somite_mask, ax=None, n_frames=200, scale_vecs=50.0
     if ax is None:
         fig = plt.figure(figsize=(12, 10))
         ax = fig.add_subplot(111, projection='3d')
+    else:
+        fig = ax.get_figure()
 
     mask_labels = np.unique(somite_mask)
     mask_labels = mask_labels[mask_labels != 0]

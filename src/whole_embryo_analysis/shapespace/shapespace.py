@@ -47,9 +47,9 @@ class ShapeSpace:
     max_sd: float = 2.0
     store_results: bool = True
     generate_figures: bool = True
-    filter_state = False 
-    lmax = LMAX
-    num_pcs = NUM_PCS
+    filter_state: bool = False
+    lmax: int = LMAX
+    num_pcs: int = NUM_PCS
     id_name: Optional[str] = "Nuclear_ID" # column name of the index of the dataframe
 
     def __post_init__(self):

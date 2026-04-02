@@ -1,10 +1,12 @@
 """
 whole_embryo_analysis Snakemake workflow
 ========================================
-Three-stage pipeline:
-  1. kde_outliers     — KDE-based outlier detection on nuclear shape metrics
-  2. shapespace_pca   — PCA on spherical harmonic coefficients
-  3. somite_features  — Per-nucleus somite feature extraction
+Five-stage pipeline:
+  1. kde_outliers            — KDE-based outlier detection on nuclear shape metrics
+  2. shapespace_pca          — PCA on spherical harmonic coefficients
+  3. somite_features         — Per-nucleus somite feature extraction
+  4. compress_surfaces       — Extract 3D surfaces from segmentation masks (Dask)
+  5. render_segmentations    — Render surfaces with ParaView (MPI + GPU)
 """
 
 configfile: "config/config.yaml"
@@ -21,13 +23,17 @@ SHAPESPACE_CSV = f"{OUTPUT_DIR}/Shapemodes_{SHP_TAG}/{SHP_TAG}_shapespace.csv"
 
 SOMITE_CSV     = f"{OUTPUT_DIR}/somite_classification_data/{config['somite']['csv_name']}.csv"
 
+SURFACE_DIR    = config["visualization"]["surface_dir"]
+PVD_FILE       = f"{SURFACE_DIR}/combined_surface.pvd"
+RENDER_DIR     = config["visualization"]["render_output_dir"]
+RENDER_DONE    = f"{RENDER_DIR}/render.done"
+
 
 # ── default target ───────────────────────────────────────────────────────────
-
 rule all:
     input:
-        SOMITE_CSV
-
+        SOMITE_CSV,
+        RENDER_DONE,
 
 # ── 1. KDE outlier detection ────────────────────────────────────────────────
 
@@ -146,5 +152,73 @@ rule somite_features:
             --dask_conda_env {params.dask[conda_env]} \
             --dask_dashboard_port {params.dask[dashboard_port]} \
             --dask_log_dir {params.dask[log_dir]} \
+            2>&1 | tee {log}
+        """
+
+
+# ── 4. Compress surfaces (Dask) ─────────────────────────────────────────────
+
+rule compress_surfaces:
+    input:
+        segmentation_mask = config["visualization"]["segmentation_mask"],
+        somite_csv        = SOMITE_CSV,
+    output:
+        pvd_file = PVD_FILE,
+    params:
+        surface_dir = SURFACE_DIR,
+        downsample  = config["visualization"]["downsample"],
+        decimate    = config["visualization"]["decimate"],
+        dask        = config["visualization"]["dask"],
+    log:
+        "logs/compress_surfaces.log"
+    shell:
+        """
+        python -m whole_embryo_analysis.mask_visualization.compress_surfaces \
+            --zarr_path {input.segmentation_mask} \
+            --output_dir {params.surface_dir} \
+            --downsample {params.downsample} \
+            --decimate {params.decimate} \
+            --dask_workers {params.dask[num_workers]} \
+            --dask_memory {params.dask[memory]} \
+            --dask_cores {params.dask[cores]} \
+            --dask_processes {params.dask[processes]} \
+            --dask_project {params.dask[project]} \
+            --dask_queue {params.dask[queue]} \
+            --dask_runtime {params.dask[runtime]} \
+            --dask_resource_spec {params.dask[resource_spec]} \
+            --dask_conda_env {params.dask[conda_env]} \
+            --dask_dashboard_port {params.dask[dashboard_port]} \
+            --dask_log_dir {params.dask[log_dir]} \
+            2>&1 | tee {log}
+        """
+
+
+# ── 5. Render segmentations (ParaView pvbatch + MPI) ────────────────────────
+
+rule render_segmentations:
+    input:
+        pvd_file = PVD_FILE,
+    output:
+        done = touch(RENDER_DONE),
+    params:
+        paraview_bin = config["visualization"]["paraview_bin_dir"],
+        surface_dir  = SURFACE_DIR,
+        render_dir   = RENDER_DIR,
+        embryo_id    = config["embryo_id"],
+        num_frames   = config["visualization"]["num_frames"],
+        output_tag   = config["visualization"]["output_tag"],
+        mpi_slots    = config["visualization"]["mpi_slots"],
+        script       = srcdir("src/whole_embryo_analysis/mask_visualization/render_segmentations.py"),
+    log:
+        "logs/render_segmentations.log"
+    shell:
+        """
+        cd {params.paraview_bin} && \
+        mpirun -np {params.mpi_slots} pvbatch {params.script} \
+            --embryonic_number {params.embryo_id} \
+            --output_dir {params.render_dir} \
+            --surface_dir {params.surface_dir} \
+            --num_frames {params.num_frames} \
+            --output_tag {params.output_tag} \
             2>&1 | tee {log}
         """

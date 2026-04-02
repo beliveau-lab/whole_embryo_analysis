@@ -8,6 +8,7 @@ import colorcet as cc
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import polars as pl
 import seaborn as sns
 from scipy.stats import gaussian_kde
 from sklearn.utils import resample
@@ -90,35 +91,25 @@ class KDEOutlierDetection:
 
     def init_data(self):
         """
-        Initalize data for KDE estimation
-
-        Returns:
-        ------
-            None
+        Initalize data for KDE estimation using Polars lazy scan.
+        Only the columns needed for pairwise density estimation are loaded.
         """
-        metrics = [
-        # list of metrics for pairwise desnity estimation
-            "Nuclear_ID",
+        self.id_col = "Nuclear_ID"
+        self.feature_cols = [
             "Nuclear_Volume",
             "Major_Axis_Length",
             "Intermediate_Axis_Length",
             "Minor_Axis_Length",
         ]
+        needed = [self.id_col] + self.feature_cols
+
         self.df = (
-            pd.read_csv(
-                self.csv_path,
-                usecols=metrics,
-                index_col=metrics[0], # index by nuclear id
-                dtype={
-                    metrics[1]: "float32",
-                    metrics[2]: "float32",
-                    metrics[3]: "float32",
-                    metrics[4]: "float32",
-                }
-            )
+            pl.scan_csv(self.csv_path)
+            .select(needed)
+            .with_columns(pl.col(c).cast(pl.Float32) for c in self.feature_cols)
+            .collect()
         )
-        logger.info(f"Using metrics: {list(self.df.columns)}. {len(self.df)} objects loaded")
-        return 
+        logger.info(f"Using metrics: {self.feature_cols}. {len(self.df)} objects loaded")
     
     def permute_pairs(self):
         """
@@ -128,14 +119,9 @@ class KDEOutlierDetection:
         -------
         pairs: list of tuples of feature pairs
         """
-        feature_names = list(self.df.columns)
-        pairs = (
-            np.array(
-                [
-                    (feature_names[i], feature_names[j]) for i in range(len(feature_names)) \
-                        for j in range(i + 1, len(feature_names))
-                ]
-            )
+        cols = self.feature_cols
+        pairs = np.array(
+            [(cols[i], cols[j]) for i in range(len(cols)) for j in range(i + 1, len(cols))]
         )
         logger.info(f"{len(pairs)} feature pairs")
         return pairs
@@ -143,60 +129,58 @@ class KDEOutlierDetection:
     # -------- Detection (Dask-parallel) --------
     def workflow(self, client):
         """
-        Parallelized detection of outliers. Main driver function to run test. 
+        Parallelized detection of outliers. Main driver function to run test.
 
         Params:
         ------
             client: Dask distributed client
-        Returns:
-        ------
-            df_density_scores: pd.DataFrame KDE density values for each cell across all feature pairs
         """
         rounds = self.n_rounds
-        n_subsample = self.n_subsample 
+        n_subsample = self.n_subsample
         pairs = self.permute_pairs()
         logger.info("Starting KDE Estimation (Dask)")
-        # Pre-extract and normalize features once to reduce serialization overhead
-        x_cache = (
-            {
-                col: (self.df[col] / self.normalize_factor).to_numpy(dtype=np.float32, copy=False) \
-                for col in self.df.columns
-            }
-        )
+
+        x_cache = {
+            col: (self.df[col] / self.normalize_factor).to_numpy().astype(np.float32)
+            for col in self.feature_cols
+        }
+
         delayed_tasks = []
         for metric_x, metric_y in pairs:
-            x_vals = x_cache[metric_x]
-            y_vals = x_cache[metric_y]
-            task = (
-                delayed(compute_median_density)(
-                    metric_x, metric_y, x_vals, y_vals, rounds, n_subsample
-                )
+            task = delayed(compute_median_density)(
+                metric_x, metric_y, x_cache[metric_x], x_cache[metric_y],
+                rounds, n_subsample,
             )
             delayed_tasks.append(task)
+
         results = client.compute(delayed_tasks, sync=True)
-        df_density_scores = pd.DataFrame(index=self.df.index)
-        for col_name, med in results:
-            df_density_scores[col_name] = med
-        
+
+        df_density_scores = pl.DataFrame(
+            {col_name: med for col_name, med in results}
+        )
+
         outlier_mask = self.identify_outliers(df_density_scores)
         self.plots(df_density_scores, outlier_mask)
-        return 
 
     def identify_outliers(self, df_density_scores):
-        # if the probability something is an outlier is less than the density threshold
-        outlier_mask = (df_density_scores < self.density_thresh).any(axis=1)
-        outlier_df = self.df[outlier_mask]
-        outlier_df.to_csv(self.outlier_path)
-        logger.info(f"Saved {len(outlier_df)} outliers to {self.outlier_path}")
+        below = [pl.col(c) < self.density_thresh for c in df_density_scores.columns]
+        outlier_mask = df_density_scores.select(
+            pl.any_horizontal(*below).alias("is_outlier")
+        )["is_outlier"]
+
+        self.df.filter(outlier_mask).write_csv(self.outlier_path)
+        logger.info(f"Saved {outlier_mask.sum()} outliers to {self.outlier_path}")
         return outlier_mask
 
     # ---------- Plotting helpers (vector-first) ----------
     def _norm_df(self) -> pd.DataFrame:
-        df_norm = self.df.copy()
-        # selecting numeric columns
-        num_cols = df_norm.select_dtypes(include=[np.number]).columns
-        df_norm[num_cols] = df_norm[num_cols] / self.normalize_factor
-        return df_norm
+        """Normalize feature columns and convert to pandas for seaborn."""
+        return (
+            self.df
+            .with_columns(pl.col(c) / self.normalize_factor for c in self.feature_cols)
+            .select(self.feature_cols)
+            .to_pandas()
+        )
 
     def _save_vectorized(self, fig, plot_name: str):
         output_path = Path(self.figure_dir) if self.figure_dir else None
@@ -219,11 +203,12 @@ class KDEOutlierDetection:
     # ---------- Plots ----------
     def outlier_summary(self, p_outlier, plot_name="outlier_summary"):
         colors = cc.glasbey_dark
-        counts = (p_outlier < self.density_thresh).sum()
-        labels = [c.replace("_vs_", " vs ").replace("-", " ").replace("_", " ") for c in p_outlier.columns]
-        order = np.argsort(counts.values)[::-1] # reverse order
+        counts = np.array([(p_outlier[c] < self.density_thresh).sum() for c in p_outlier.columns])
+        labels = np.array([c.replace("_vs_", " vs ").replace("-", " ").replace("_", " ")
+                           for c in p_outlier.columns])
+        order = np.argsort(counts)[::-1]
         fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-        ax.barh(np.array(labels)[order], counts.values[order], color=colors[0])
+        ax.barh(labels[order], counts[order], color=colors[0])
         ax.invert_yaxis()
         ax.set_xlabel("Number of Outliers")
         ax.set_title("Outliers per Feature Pair")
@@ -232,13 +217,11 @@ class KDEOutlierDetection:
 
 
     def comprehensive_pairplot(self, outlier_mask, max_points=10000):
-        df_plot = self.df_plot 
-        df_plot["outlier_status"] = (
-            pd.Categorical(
-                np.where(outlier_mask, "Outlier", "Normal"),
-                categories=["Normal", "Outlier"], 
-                ordered=True
-                )
+        df_plot = self.df_plot
+        df_plot["outlier_status"] = pd.Categorical(
+            np.where(outlier_mask.to_numpy(), "Outlier", "Normal"),
+            categories=["Normal", "Outlier"],
+            ordered=True,
         )
         # if len(df_plot) > max_points:
         #     logger.info(f"Sampling {max_points} points from {len(df_plot)}")

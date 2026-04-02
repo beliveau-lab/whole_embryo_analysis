@@ -1,4 +1,5 @@
 import argparse
+import sys
 import time
 import logging
 from pathlib import Path
@@ -47,6 +48,8 @@ def join_somite_metadata(nuclear_df, somite_lut):
     meta_dtype = somite_lut.schema['Somite_ID']
     if nuclear_dtype != meta_dtype:
         logger.warning(f"Somite_ID dtype mismatch: nuclear={nuclear_dtype}, lut={meta_dtype}")
+        target = meta_dtype
+        nuclear_df = nuclear_df.with_columns(pl.col('Somite_ID').cast(target))
 
     result = nuclear_df.join(somite_lut, on='Somite_ID', how='inner')
     logger.info(result.head())

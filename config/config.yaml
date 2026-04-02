@@ -1,13 +1,15 @@
 # =============================================================================
 # whole_embryo_analysis — Snakemake configuration
 # =============================================================================
-# All paths and parameters for the three-stage pipeline:
+# All paths and parameters for the pipeline:
 #   1. KDE outlier detection
 #   2. Shapespace PCA on spherical harmonic coefficients
 #   3. Somite feature extraction
+#   4. Mask visualization (surface extraction + ParaView rendering)
 
 # --- Static input data ---
-feature_csv: "/net/beliveau/vol2/instrument/E9.5_306/Zoom_306/dataset_fused_features-JGseg-030926_cclabel.csv"
+# feature_csv: "/net/beliveau/vol2/instrument/E9.5_306/Zoom_306/dataset_fused_features-JGseg-030926_cclabel.csv"
+feature_csv: "/net/beliveau/vol2/instrument/E9.5_306/Zoom_306/dataset_fused_features_Julia_FT_Feb26.csv"
 somite_mask: "/net/beliveau/vol1/project/EKN_whole_embryo_structural_analysis/Somites/E9.5_306/306_all_somites_no_PSM.tif"
 
 nuclear_mask: "/net/beliveau/vol2/instrument/E9.5_306/Zoom_306/dataset_fused_masks_Julia_FT.zarr"
@@ -65,4 +67,31 @@ somite:
     resource_spec: "mfree=64G"
     conda_env: "visualization"
     log_dir: "logs/dask/somite"
+    dashboard_port: ":41263"
+
+# --- 4. Mask visualization ---
+visualization:
+  # compress_surfaces step
+  segmentation_mask: "/net/beliveau/vol2/instrument/E9.5_306/Zoom_306/dataset_fused_masks.zarr"
+  surface_dir: "/net/beliveau/vol2/instrument/E9.5_306/Zoom_306/surfaces_compressed"
+  downsample: 2
+  decimate: 0.5
+  # render_segmentations step (ParaView + MPI)
+  paraview_bin_dir: "/net/beliveau/vol1/home/msforman/ParaView-6.0.0-RC1-MPI-Linux-Python3.12-x86_64/bin"
+  render_output_dir: "/net/beliveau/vol2/instrument/E9.5_306/Zoom_306/analysis_snakemake/rendered_frames"
+  num_frames: 25
+  output_tag: "_"
+  mpi_slots: 2
+  # Dask-JobQueue cluster settings for compress_surfaces
+  dask:
+    num_workers: 1
+    memory: "64G"
+    cores: 4
+    processes: 1
+    project: "beliveaulab"
+    queue: "beliveau-long.q"
+    runtime: 7200
+    resource_spec: "mfree=64G"
+    conda_env: "otls-pipeline"
+    log_dir: "logs/dask/visualization"
     dashboard_port: ":41263"
