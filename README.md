@@ -1,4 +1,5 @@
 # whole_embryo_analysis
+<<<<<<< HEAD
 
 Analysis and visualization pipeline for whole-embryo light sheet microscopy data. Performs nuclear shape outlier detection, PCA-based shape space analysis on spherical harmonic coefficients, and somite-level feature extraction.
 
@@ -70,3 +71,6 @@ whole_embryo_analysis/
 ├── figures/                    # Generated figures and meshes
 └── logs/                       # Snakemake and per-rule logs
 ```
+=======
+This repository will contain all notebooks and analytical steps resulting from the lightsheet analysis pipeline: https://github.com/beliveau-lab/lightsheet-analysis-pipeline
+>>>>>>> 2fc83721d629d2f2ac50fd832950eb887d8f2f43
