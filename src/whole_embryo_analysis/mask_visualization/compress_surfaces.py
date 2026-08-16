@@ -65,15 +65,17 @@ def write_pvd_collection(vtp_paths, output_path, timestep=0):
     print(f"Wrote collection file with {len(vtp_paths)} pieces → {output_path}")
     return
 
-def process_chunk_to_contours(chunk_data, chunk_offset, out_dir, block_id, spacing=(1.0, 1.0, 1.0), decimate=0.0):
+def process_chunk_to_contours(chunk_data, chunk_offset, out_dir, block_id,
+                              spacing=(1.0, 1.0, 1.0), decimate=0.0,
+                              inner_bounds=None):
     """Process single chunk to extract contour surfaces for objects.
-    
+
     Parameters
     ----------
     chunk_data : np.ndarray
-        3D array of segmentation labels for this chunk
+        3D array of segmentation labels for this chunk (may include halo).
     chunk_offset : tuple
-        (z, y, x) offset of this chunk in the full array
+        (z, y, x) offset of this chunk (including halo) in the full array.
     out_dir : str
         Output directory for .vtp files
     block_id : tuple
@@ -82,20 +84,25 @@ def process_chunk_to_contours(chunk_data, chunk_offset, out_dir, block_id, spaci
         (z, y, x) voxel spacing - accounts for downsampling factor
     decimate : float
         Decimation factor (0.0 = no decimation, 0.5 = reduce by 50%)
+    inner_bounds : tuple of 6 floats or None
+        (xmin, xmax, ymin, ymax, zmin, zmax) in physical coords defining
+        the inner (non-halo) region.  After contouring the padded chunk,
+        cells whose centres fall outside this box are discarded so that
+        boundary seams between neighbouring chunks are eliminated.
     """
     import vtk
     from vtk.util import numpy_support
-    
+
     unique_labels = np.unique(chunk_data)
     major_labels = unique_labels[unique_labels > 0]
-    
+
     if len(major_labels) == 0:
         return None
-    
+
     # Ensure the output directory exists on the worker
     os.makedirs(out_dir, exist_ok=True)
     surfaces = []  # (label, vtkPolyData) pairs
-    
+
     # Convert spacing from ZYX to XYZ for VTK
     vtk_spacing = (float(spacing[2]), float(spacing[1]), float(spacing[0]))
     vtk_origin = (
@@ -103,26 +110,26 @@ def process_chunk_to_contours(chunk_data, chunk_offset, out_dir, block_id, spaci
         float(chunk_offset[1]) * vtk_spacing[1],
         float(chunk_offset[0]) * vtk_spacing[2]
     )
-    
-    for label in major_labels: 
+
+    for label in major_labels:
         binary_data = (chunk_data == label).astype(np.uint8)
-        
+
         # create VTK image data
         img_data = vtk.vtkImageData()
         img_data.SetDimensions(*binary_data.shape[::-1])  # VTK uses XYZ order
         img_data.SetOrigin(*vtk_origin)
         img_data.SetSpacing(*vtk_spacing)
-        
+
         # Add data
         vtk_array = numpy_support.numpy_to_vtk(binary_data.ravel(), deep=False)
         img_data.GetPointData().SetScalars(vtk_array)
-        
+
         # Generate contour surface
         contour = vtk.vtkContourFilter()
         contour.SetInputData(img_data)
         contour.SetValue(0, 0.5)
         contour.Update()
-        
+
         surface = contour.GetOutput()
         if surface.GetNumberOfPoints() > 0:
             # Apply decimation if requested
@@ -133,7 +140,7 @@ def process_chunk_to_contours(chunk_data, chunk_offset, out_dir, block_id, spaci
                 decimator.PreserveTopologyOn()
                 decimator.Update()
                 surface = decimator.GetOutput()
-            
+
             # Generate normals for better rendering
             normals = vtk.vtkPolyDataNormals()
             normals.SetInputData(surface)
@@ -144,14 +151,14 @@ def process_chunk_to_contours(chunk_data, chunk_offset, out_dir, block_id, spaci
             normals.AutoOrientNormalsOn()
             normals.Update()
             surface = normals.GetOutput()
-            
+
             # Add label as cell scalar
             label_array = vtk.vtkIntArray()
             label_array.SetName("SegmentationLabel")
             label_array.SetNumberOfTuples(surface.GetNumberOfCells())
             label_array.FillComponent(0, label)
             surface.GetCellData().SetScalars(label_array)
-            
+
             surfaces.append((label, surface))
 
     if len(surfaces) == 0:
@@ -162,12 +169,30 @@ def process_chunk_to_contours(chunk_data, chunk_offset, out_dir, block_id, spaci
         append.AddInputData(surf)
     append.Update()
 
+    # Clip to inner (non-halo) bounds so boundary seams are eliminated.
+    merged = append.GetOutput()
+    if inner_bounds is not None:
+        xmin, xmax, ymin, ymax, zmin, zmax = inner_bounds
+        box = vtk.vtkBox()
+        box.SetBounds(xmin, xmax, ymin, ymax, zmin, zmax)
+
+        clip = vtk.vtkExtractPolyDataGeometry()
+        clip.SetInputData(merged)
+        clip.SetImplicitFunction(box)
+        clip.ExtractInsideOn()
+        clip.ExtractBoundaryCellsOn()
+        clip.Update()
+        merged = clip.GetOutput()
+
+    if merged.GetNumberOfCells() == 0:
+        return None
+
     file_name = f"block_{'_'.join(map(str, block_id))}.vtp"
     file_path = os.path.join(out_dir, file_name)
 
     writer = vtk.vtkXMLPolyDataWriter()
     writer.SetFileName(file_path)
-    writer.SetInputData(append.GetOutput())
+    writer.SetInputData(merged)
     writer.SetDataModeToAppended()  # binary "appended-raw" section
     writer.SetCompressorTypeToZLib()
     writer.SetCompressionLevel(9)
@@ -175,9 +200,10 @@ def process_chunk_to_contours(chunk_data, chunk_offset, out_dir, block_id, spaci
 
     return [{"path": file_path, "labels": [int(l) for l, _ in surfaces]}]
 
-def extract_surfaces(zarr_path, client, out_dir, downsample, decimate=0.0):
+def extract_surfaces(zarr_path, client, out_dir, downsample, decimate=0.0,
+                     mask_subpath=None):
     """Extract surfaces from zarr in parallel chunks. Submitted to dask workers.
-    
+
     Parameters
     ----------
     zarr_path : str
@@ -187,43 +213,86 @@ def extract_surfaces(zarr_path, client, out_dir, downsample, decimate=0.0):
     out_dir : str
         Output directory for .vtp files
     downsample : int
-        Downsampling factor (1 = no downsampling)
+        Downsampling factor (1 = no downsampling). Only used as a strided
+        fallback when no pre-downsampled pyramid level is available.
     decimate : float
         Mesh decimation factor (0.0 = no decimation, 0.5 = reduce by 50%)
-    
+    mask_subpath : str or None
+        Optional Zarr subpath pointing at a pre-downsampled pyramid level
+        (e.g. ``"s1"``, ``"s2"``, ``"s3"``). **Strongly preferred** over
+        ``downsample`` for large masks: strided indexing on a dask array
+        still reads every full chunk and then discards data, so a 3TB mask
+        with ``downsample=2`` is a 3TB read. Reading from a pyramid level
+        reads only the already-coarsened bytes.
+
     Returns
     -------
     list[dict]
         Metadata for each generated surface file
     """
-    logger.info(f"Loading zarr: {zarr_path}")
-    arr = load_n5_zarr_array(zarr_path)
-    
-    # Calculate spacing based on downsample factor
-    spacing = (float(downsample), float(downsample), float(downsample))
-    
-    if downsample > 1:
-        arr = arr[::downsample, ::downsample, ::downsample]
-        logger.info(f"Applied downsampling factor: {downsample}, effective spacing: {spacing}")
+    logger.info(f"Loading zarr: {zarr_path} (subpath={mask_subpath or '<root>'})")
+    arr = load_n5_zarr_array(zarr_path, n5_subpath=mask_subpath)
+
+    if mask_subpath:
+        # Reading a pre-downsampled level: the coarsening is baked into the
+        # stored data, so we don't stride further and the effective spacing
+        # is 1 voxel in the level's own coordinate system.
+        spacing = (1.0, 1.0, 1.0)
+        if downsample > 1:
+            logger.info(
+                "mask_subpath=%s supplied; ignoring --downsample=%d because "
+                "the pyramid level is already pre-downsampled.",
+                mask_subpath, downsample,
+            )
+    else:
+        spacing = (float(downsample), float(downsample), float(downsample))
+        if downsample > 1:
+            logger.warning(
+                "Strided downsampling (factor=%d) on a dask array still reads "
+                "every full chunk before discarding voxels — this does NOT "
+                "save I/O. If your zarr has a pre-downsampled pyramid level "
+                "(e.g. s1/s2/s3), pass --mask_subpath to read it directly.",
+                downsample,
+            )
+            arr = arr[::downsample, ::downsample, ::downsample]
+            logger.info(
+                f"Applied strided downsample factor {downsample}, "
+                f"effective spacing: {spacing}"
+            )
     
     chunk_shape = tuple(c[0] for c in arr.chunks)
     logger.info(f"Loaded Mask (ZYX assumed): Shape={arr.shape}, Dtype={arr.dtype}, Chunk Shape: {chunk_shape}")
 
+    halo = 1  # voxels of overlap to eliminate chunk-boundary seams
     delayed_tasks = []
     for block_id in np.ndindex(*arr.numblocks):
-        # Calculate chunk slice and offset
-        chunk_slices = tuple(
-            slice(sum(arr.chunks[i][:block_id[i]]), 
-                  sum(arr.chunks[i][:block_id[i]+1]))
-            for i in range(arr.ndim)
-        )
-        chunk_offset = tuple(sum(arr.chunks[i][:block_id[i]]) for i in range(arr.ndim))
+        # Inner (non-halo) chunk bounds
+        inner_start = tuple(sum(arr.chunks[i][:block_id[i]]) for i in range(arr.ndim))
+        inner_end = tuple(sum(arr.chunks[i][:block_id[i]+1]) for i in range(arr.ndim))
+
+        # Expand by halo, clamped to array shape
+        halo_start = tuple(max(s - halo, 0) for s in inner_start)
+        halo_end = tuple(min(e + halo, arr.shape[i]) for i, e in enumerate(inner_end))
+
+        chunk_slices = tuple(slice(s, e) for s, e in zip(halo_start, halo_end))
         chunk = arr[chunk_slices]
-        
+
+        # Inner bounds in physical (VTK XYZ) coords for clipping
+        # VTK order is (X, Y, Z); spacing is ZYX
+        inner_bounds = (
+            float(inner_start[2]) * float(spacing[2]),  # xmin
+            float(inner_end[2])   * float(spacing[2]),  # xmax
+            float(inner_start[1]) * float(spacing[1]),  # ymin
+            float(inner_end[1])   * float(spacing[1]),  # ymax
+            float(inner_start[0]) * float(spacing[0]),  # zmin
+            float(inner_end[0])   * float(spacing[0]),  # zmax
+        )
+
         # Create delayed task with spacing and decimation parameters
         task = delayed(process_chunk_to_contours)(
-            chunk, chunk_offset, out_dir, block_id,
-            spacing=spacing, decimate=decimate
+            chunk, halo_start, out_dir, block_id,
+            spacing=spacing, decimate=decimate,
+            inner_bounds=inner_bounds,
         )
         delayed_tasks.append(task)
     
@@ -291,9 +360,14 @@ def parse_args():
     parser.add_argument('--output_dir', type=str, required=True,
                         help='Output directory for surface files')
     parser.add_argument('--downsample', type=int, default=2,
-                        help='Downsampling factor')
+                        help='Strided downsample factor (fallback only; '
+                             'does not save I/O — prefer --mask_subpath)')
     parser.add_argument('--decimate', type=float, default=0.0,
                         help='Mesh decimation factor (0.0=none, 0.5=50%% reduction)')
+    parser.add_argument('--mask_subpath', type=str, default=None,
+                        help='Zarr subpath for a pre-downsampled pyramid level '
+                             '(e.g. "s1", "s2", "s3"). Strongly preferred over '
+                             '--downsample for multi-TB masks.')
 
     viz_defaults = {
         "workers": 1, "memory": "64G", "cores": 4, "processes": 1,
@@ -316,6 +390,7 @@ def main():
 
     logger.info("Starting surface extraction:")
     logger.info(f"  Zarr path:    {args.zarr_path}")
+    logger.info(f"  Mask subpath: {args.mask_subpath or '<root>'}")
     logger.info(f"  Output dir:   {args.output_dir}")
     logger.info(f"  Downsample:   {args.downsample}")
     logger.info(f"  Decimation:   {args.decimate*100:.0f}%")
@@ -333,6 +408,7 @@ def main():
             args.output_dir,
             downsample=args.downsample,
             decimate=args.decimate,
+            mask_subpath=args.mask_subpath,
         )
 
         if not metadata:

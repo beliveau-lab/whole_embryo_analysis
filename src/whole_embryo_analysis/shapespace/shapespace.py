@@ -34,7 +34,7 @@ warnings.filterwarnings('ignore')
 from whole_embryo_analysis.shapespace import figures
 LMAX = 16
 NUM_PCS = 6
-DIR_TAG = 'Shapemodes' # will save a directory in the Sample#Dir as Sample#/DIR_TAG/
+DIR_TAG = 'shapemodes' # will save a directory in the Sample#Dir as Sample#/DIR_TAG/
 
 @dataclass
 class ShapeSpace:

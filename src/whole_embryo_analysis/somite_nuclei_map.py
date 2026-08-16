@@ -10,14 +10,15 @@ import numpy as np
 import polars as pl
 import argparse
 from whole_embryo_analysis.utils.scale_resolution import S3_SCALE, from_s0, scale_mask
+from whole_embryo_analysis.utils.io import scan_features
 from whole_embryo_analysis.somite_analysis.bio_frame import get_somite_centroids
 import os
 
 def load_nuclear_features(csv_path, use_s0=False): # if use_s0 False -> s3
-    """Load centroids and Nuclear_ID from a feature CSV."""
+    """Load centroids and Nuclear_ID from a feature table (CSV or Parquet)."""
     coord_cols = ["Centroid_X", "Centroid_Y", "Centroid_Z"]
     df = (
-        pl.scan_csv(csv_path)
+        scan_features(csv_path)
         .select(coord_cols + ["Nuclear_ID"])
         .collect()
     )
@@ -179,7 +180,8 @@ def main():
     
     somite_lut = pl.read_csv(args.somite_lut_path)
     somite_lut = somite_lut.filter(pl.col("Embryo_ID") == int(args.sample_id))
-    print(f"Number of total somites in {args.sample_id}: {len(somite_lut["Somite_ID"].unique())}")
+    n_somites = len(somite_lut['Somite_ID'].unique())
+    print(f"Number of total somites in {args.sample_id}: {n_somites}")
     # Sanity check on ids in each
     check_lut_ids(somite_lut, somite_mask)
     somite_lut = get_somite_centroids(somite_mask, somite_lut, scale=False)

@@ -3,7 +3,7 @@ from whole_embryo_analysis.somite_analysis.bio_frame import (
     FrenetFrame,
 )
 
-from whole_embryo_analysis.somite_analysis.somite_analysis import (
+from whole_embryo_analysis.somite_analysis.frames import (
     build_anatomical_frame,
     build_frenet_frame,
     build_hybrid_frame,

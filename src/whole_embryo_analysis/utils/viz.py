@@ -1,5 +1,5 @@
 """
-Single source of truth for figure saving and color helpers.
+Single source of truth for figure saving, color helpers, and camera utilities.
 Use this module instead of duplicating save_vectorized or hex_to_rgb elsewhere.
 """
 from __future__ import annotations
@@ -10,6 +10,7 @@ from typing import Union
 
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,60 @@ def save_vectorized(
         logger.info("Saved plot: %s", out_file)
     else:
         plt.show()
+
+
+def napari_camera_to_plotly(
+    angles: tuple[float, float, float],
+    center: tuple[float, float, float],
+    zoom: float,
+    s_scale: float = 4.0,
+    x_vals: np.ndarray | None = None,
+    y_vals: np.ndarray | None = None,
+    z_vals: np.ndarray | None = None,
+) -> dict:
+    """Convert Napari-style camera parameters to a Plotly ``scene_camera`` dict.
+
+    Parameters
+    ----------
+    angles : (elevation, azimuth, roll)
+        Napari camera angles in degrees.
+    center : (z, y, x)
+        Napari camera center in **s2 ZYX pixels**.
+    zoom : float
+        Napari zoom level.
+    s_scale : float
+        Downsampling factor for the center coordinates (e.g. 4 for s2).
+    x_vals, y_vals, z_vals : array-like
+        Data coordinates used to compute data range and centroid for
+        normalization.  All three are required.
+    """
+    ang = np.deg2rad(angles)
+
+    view_direction = np.array([
+        np.sin(ang[2]) * np.cos(ang[1]),
+        np.cos(ang[2]) * np.cos(ang[1]),
+        -np.sin(ang[1]),
+    ])[::-1]
+
+    R = Rotation.from_euler('yzx', angles, degrees=True).as_matrix()
+    up_direction = (R[:, 2][::-1])[::-1]
+
+    s0_center = np.array(center)[::-1] * s_scale
+
+    data_range = max(np.ptp(x_vals), np.ptp(y_vals), np.ptp(z_vals))
+    distance = data_range / zoom
+    eye_pos = s0_center - view_direction * distance
+
+    data_mid = np.array([x_vals.mean(), y_vals.mean(), z_vals.mean()])
+    eye_norm = (eye_pos - data_mid) / data_range
+    center_norm = (s0_center - data_mid) / data_range
+
+    return dict(
+        eye=dict(x=float(eye_norm[0]), y=float(eye_norm[1]), z=float(eye_norm[2])),
+        up=dict(x=float(up_direction[0]), y=float(up_direction[1]), z=float(up_direction[2])),
+        center=dict(x=float(center_norm[0]), y=float(center_norm[1]), z=float(center_norm[2])),
+        projection=dict(type="orthographic"),
+    )
 
 
 def hex_to_rgb(hex_color: str, normalize: bool = False) -> Union[tuple[int, int, int], np.ndarray]:

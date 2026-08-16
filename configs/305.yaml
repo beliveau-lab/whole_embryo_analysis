@@ -1,0 +1,86 @@
+# =============================================================================
+# whole_embryo_analysis - Snakemake configuration
+# =============================================================================
+# All paths and parameters for the pipeline:
+#   1. KDE outlier detection
+#   2. Shapespace PCA on spherical harmonic coefficients
+#   3. Somite-nucleus mapping
+#   4. Somite feature extraction (positions + per-somite enrichment)
+#   5. Somite clustering
+#   6. Mask visualization (surface extraction + ParaView rendering)
+
+embryo_id: 305
+sample_dir: "/net/beliveau/vol2/instrument/E9.5_305/Zoom_305"
+# =============================================================================
+
+# --- Derived paths are built in the Snakefile from sample_dir + embryo_id ---
+somite_lut: "/net/beliveau/vol1/project/EKN_whole_embryo_structural_analysis/Somites/all_embryos_somite_metrics_merged.csv"
+
+# --- 1. Outlier detection (Mahalanobis distance) ---
+outlier_detection:                                                            
+  alpha: 0.001
+  
+# --- 2. Shapespace PCA ---
+shapespace:
+  str_tag: "pca"
+  id_name: "Nuclear_ID"
+  lmax: 16
+  num_pcs: 6
+  store_results: true
+  generate_figures: true
+
+# --- 3. Somite feature extraction (positions + enrichment) ---
+somite:
+  frame_type: "hybrid"          # anatomical | frenet | hybrid
+  positions_csv_name: "biological_coordinates"
+  spline_csv_path: '/net/beliveau/vol2/instrument/E9.5_305/Zoom_305/whole_embryo_masks_and_contours_corrected/Points_for_anatomy_axes_s4_10_reordered.csv'
+  foldback_k: 1500
+  foldback_n_iter: 50
+  # Physical voxel size (um) at somite-mask resolution (s3) -> used in distance_transform_edt() | depth is in um, not voxels.
+  voxel_size: [1.368, 1.368, 1.368]
+  # Napari camera params for position scatter plots
+  camera_center:  [556.0920000000001, 1301.976152709961, 1002.0957415466308]
+  camera_angles: [-0.035436037313865, -18.423981009201693, -78.10789342177546]
+  camera_zoom: 0.23877562802598723
+  camera_s_scale: 4.0
+  dask:
+    num_workers: 1
+    memory: "64G"
+    cores: 10
+    processes: 10
+    project: "beliveaulab"
+    queue: "beliveau-long.q"
+    runtime: 43200
+    resource_spec: "mfree=8G"
+    conda_env: "visualization"
+    log_dir: "logs/dask/somite"
+    dashboard_port: ":41263"
+
+# --- 4. Somite clustering ---
+clustering:
+  n_clusters: 2                   # Ward's linkage into k classes
+
+# --- 5. Mask visualization ---
+visualization:
+  # compress_surfaces step
+  # segmentation_mask, surface_dir, render_output_dir derived from sample_dir
+  downsample: 2
+  decimate: 0.5
+  # render_segmentations step (ParaView + MPI)
+  paraview_bin_dir: "/net/beliveau/vol1/home/msforman/ParaView-6.0.0-RC1-MPI-Linux-Python3.12-x86_64/bin"
+  num_frames: 25
+  output_tag: "_"
+  mpi_slots: 2
+  # Dask-JobQueue cluster settings for compress_surfaces
+  dask:
+    num_workers: 1
+    memory: "64G"
+    cores: 4
+    processes: 1
+    project: "beliveaulab"
+    queue: "beliveau-long.q"
+    runtime: 7200
+    resource_spec: "mfree=64G"
+    conda_env: "otls-pipeline"
+    log_dir: "logs/dask/visualization"
+    dashboard_port: ":41263"

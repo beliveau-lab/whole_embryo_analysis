@@ -1,7 +1,7 @@
 import numpy as np
 import polars as pl
 from scipy.interpolate import splprep, splev
-from whole_embryo_analysis.somite_analysis.curvature import SomiteSpline
+from whole_embryo_analysis.somite_analysis.geometry.curvature import SomiteSpline
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 import seaborn as sns

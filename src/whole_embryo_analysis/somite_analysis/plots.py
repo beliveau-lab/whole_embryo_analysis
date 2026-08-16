@@ -1,3 +1,6 @@
+import logging
+from pathlib import Path
+
 # Core imports - used across many functions
 import numpy as np
 import pandas as pd
@@ -8,11 +11,13 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.gridspec import GridSpec
 
 from whole_embryo_analysis.utils.scale_resolution import S3_SCALE, from_s0
-from whole_embryo_analysis.utils.viz import hex_to_rgb, save_vectorized
+from whole_embryo_analysis.utils.viz import hex_to_rgb, save_vectorized, napari_camera_to_plotly
+
+logger = logging.getLogger(__name__)
 
 CLUSTER_COLORS = {
-    1: "#984ea3",  # purple
-    2: "#ff7f00",  # orange
+    1: "#FF00FF",  # magenta
+    2: "#00FFFF",  # cyan
     3: "#4daf4a",  # green
     4: "#e41a1c",  # red
     5: "#377eb8",  # blue
@@ -121,8 +126,8 @@ def load_somite_roi(nuclear_mask_da,
         'y_offset': y_min - pad
     }
 
-def plot_nuclear_masks(mask_roi, 
-                       df_features, 
+def plot_nuclear_masks(mask_roi,
+                       df_features,
                        cluster_col,
                        z_range=None,
                        z_offset=0,
@@ -130,18 +135,24 @@ def plot_nuclear_masks(mask_roi,
                        z_factor=0.5,
                        title=None,
                        ax=None,
-                       save_dir=None):
+                       save_dir=None,
+                       vmin=None,
+                       vmax=None,
+                       show_colorbar=True):
     """
-    Plot nuclear masks colored by cluster assignment.
-    
-    Parameters:
-    -----------
+    Plot nuclear masks colored by cluster assignment on a pure black background.
+
+    Cells are rendered fully opaque into a single RGB image, so the saved SVG
+    does not composite against the viewer's background color.
+
+    Parameters
+    ----------
     mask_roi : np.ndarray
         3D nuclear mask array (already computed, not dask)
     df_features : pd.DataFrame
         DataFrame with Nuclear_ID, Centroid_Z, and cluster_col
     cluster_col : str
-        Column name for coloring (e.g., 'cluster_hier' for discrete, others for continuous)
+        Column name for coloring ('cluster_hier' for discrete, else continuous)
     z_range : tuple, optional
         (z_min, z_max) in full volume coordinates. If None, computed from df_features.
     z_offset : int
@@ -151,11 +162,15 @@ def plot_nuclear_masks(mask_roi,
     z_factor : float
         Fraction of z-span to include (0.5 = full somite, 0.1 = thin slice)
     title : str, optional
-        Figure title. If None, uses default based on cluster_col.
+        Unused placeholder retained for call-site compatibility
     ax : matplotlib.axes.Axes, optional
         Axis to plot on (ignored if show_orthogonal=True)
     save_dir : str, optional
         Directory to save figure
+    vmin, vmax : float, optional
+        Fixed color limits for continuous coloring
+    show_colorbar : bool
+        Draw a colorbar for continuous coloring
     """
     if z_range is None:
         z_min, z_max = df_features['Centroid_Z'].min(), df_features['Centroid_Z'].max()
@@ -170,12 +185,14 @@ def plot_nuclear_masks(mask_roi,
     mask_slab = mask_roi[z_start:z_end]
 
     use_discrete = (cluster_col == 'cluster_hier')
-    
+
     if use_discrete:
         clusters = sorted(df_features[cluster_col].unique())
     else:
         all_values = df_features[cluster_col].dropna().values
-        norm = Normalize(vmin=all_values.min(), vmax=all_values.max())
+        lo = vmin if vmin is not None else all_values.min()
+        hi = vmax if vmax is not None else all_values.max()
+        norm = Normalize(vmin=lo, vmax=hi)
         cmap = plt.cm.viridis
 
     def paint_cell(overlay, cell_id, rgb, proj_axis):
@@ -201,8 +218,9 @@ def plot_nuclear_masks(mask_roi,
         axes = [ax]
 
     for ax_i, (proj_axis, proj_title) in zip(axes, projections):
-        mip_bg = (mask_slab > 0).max(axis=proj_axis).astype(float)
-        overlay = np.zeros((*mip_bg.shape, 3))
+        # Pure black canvas at the projected shape; cells painted opaque on top.
+        proj_shape = tuple(s for i, s in enumerate(mask_slab.shape) if i != proj_axis)
+        overlay = np.zeros((*proj_shape, 3))
 
         if use_discrete:
             for c in clusters:
@@ -216,34 +234,162 @@ def plot_nuclear_masks(mask_roi,
                 if not np.isnan(val):
                     paint_cell(overlay, row['Nuclear_ID'], cmap(norm(val))[:3], proj_axis)
 
-        ax_i.imshow(mip_bg, cmap='gray', alpha=0.3, origin='lower', aspect='auto')
-        ax_i.imshow(np.clip(overlay, 0, 1), alpha=0.8, origin='lower', aspect='auto')
+        # Single opaque draw - no alpha, so nothing blends with the page background.
+        ax_i.imshow(np.clip(overlay, 0, 1), origin='lower', aspect='auto',
+                    interpolation='nearest')
         if proj_title:
             ax_i.set_title(proj_title, fontsize=11)
         ax_i.axis('off')
-        
-        # Add z-range text below the plot
+
         z_text = f"Z: {int(z_range[0])} - {int(z_range[1])}"
-        ax_i.text(0.5, -0.05, z_text, transform=ax_i.transAxes, 
+        ax_i.text(0.5, -0.05, z_text, transform=ax_i.transAxes,
                   ha='center', va='top', fontsize=10, color='white')
-    
+
     if use_discrete:
-        legend_elements = [Patch(facecolor=CLUSTER_COLORS[c], label=f'Cluster {c}') for c in clusters]
-        legend = axes[0].legend(handles=legend_elements, loc='upper left', 
-                                frameon=False, labelcolor='white')
-    else:
+        legend_elements = [Patch(facecolor=CLUSTER_COLORS[c], label=f'Cluster {c}')
+                           for c in clusters]
+        axes[0].legend(handles=legend_elements, loc='upper left',
+                       frameon=False, labelcolor='white')
+    elif show_colorbar:
         sm = ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
         cbar = fig.colorbar(sm, ax=axes, orientation='vertical', fraction=0.02, pad=0.04)
-        cbar.set_label(cluster_col, fontsize=10)
+        cbar.set_label(cluster_col, fontsize=10, color='white')
+        cbar.ax.tick_params(colors='white')
 
-    # fig_title = title if title else f'Cells colored by {cluster_col}'
-    # fig.suptitle(fig_title, fontsize=14)
-    
     if save_dir is not None:
         save_vectorized(save_dir, fig, 'nuclear_masks_mip')
-    
+
     return fig, axes[0]
+    
+# def plot_nuclear_masks(mask_roi,
+#                        df_features,
+#                        cluster_col,
+#                        z_range=None,
+#                        z_offset=0,
+#                        show_orthogonal=False,
+#                        z_factor=0.5,
+#                        title=None,
+#                        ax=None,
+#                        save_dir=None,
+#                        vmin=None,
+#                        vmax=None,
+#                        show_colorbar=True):
+#     """
+#     Plot nuclear masks colored by cluster assignment.
+    
+#     Parameters:
+#     -----------
+#     mask_roi : np.ndarray
+#         3D nuclear mask array (already computed, not dask)
+#     df_features : pd.DataFrame
+#         DataFrame with Nuclear_ID, Centroid_Z, and cluster_col
+#     cluster_col : str
+#         Column name for coloring (e.g., 'cluster_hier' for discrete, others for continuous)
+#     z_range : tuple, optional
+#         (z_min, z_max) in full volume coordinates. If None, computed from df_features.
+#     z_offset : int
+#         Offset to convert full volume coords to ROI coords
+#     show_orthogonal : bool
+#         Whether to show XY, XZ, and YZ projections
+#     z_factor : float
+#         Fraction of z-span to include (0.5 = full somite, 0.1 = thin slice)
+#     title : str, optional
+#         Figure title. If None, uses default based on cluster_col.
+#     ax : matplotlib.axes.Axes, optional
+#         Axis to plot on (ignored if show_orthogonal=True)
+#     save_dir : str, optional
+#         Directory to save figure
+#     """
+#     if z_range is None:
+#         z_min, z_max = df_features['Centroid_Z'].min(), df_features['Centroid_Z'].max()
+#         z_span = z_max - z_min
+#         z_center = (z_min + z_max) / 2
+#         z_range = (z_center - z_factor * z_span, z_center + z_factor * z_span)
+
+#     df_slab = df_features[df_features['Centroid_Z'].between(*z_range)].copy()
+
+#     z_start = max(0, int(z_range[0] - z_offset))
+#     z_end = min(mask_roi.shape[0], int(z_range[1] - z_offset))
+#     mask_slab = mask_roi[z_start:z_end]
+
+#     use_discrete = (cluster_col == 'cluster_hier')
+    
+#     if use_discrete:
+#         clusters = sorted(df_features[cluster_col].unique())
+#     else:
+#         all_values = df_features[cluster_col].dropna().values
+#         lo = vmin if vmin is not None else all_values.min()
+#         hi = vmax if vmax is not None else all_values.max()
+#         norm = Normalize(vmin=lo, vmax=hi)
+#         cmap = plt.cm.viridis
+
+#     def paint_cell(overlay, cell_id, rgb, proj_axis):
+#         cell_mip = (mask_slab == cell_id).max(axis=proj_axis)
+#         overlay[cell_mip] = rgb
+
+#     projections = [
+#         (0, 'XY (top-down)'),
+#         (1, 'XZ (front)'),
+#         (2, 'YZ (side)'),
+#     ] if show_orthogonal else [(0, None)]
+
+#     if show_orthogonal:
+#         z_size, y_size, x_size = mask_slab.shape
+#         fig = plt.figure(figsize=(8, 4 * (y_size + 2 * z_size) / y_size + 1))
+#         gs = GridSpec(3, 1, height_ratios=[y_size, z_size, z_size], hspace=0.3)
+#         axes = [fig.add_subplot(gs[i]) for i in range(3)]
+#     elif ax is None:
+#         fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+#         axes = [ax]
+#     else:
+#         fig = ax.figure
+#         axes = [ax]
+
+#     for ax_i, (proj_axis, proj_title) in zip(axes, projections):
+#         mip_bg = (mask_slab > 0).max(axis=proj_axis).astype(float)
+#         overlay = np.zeros((*mip_bg.shape, 3))
+
+#         if use_discrete:
+#             for c in clusters:
+#                 ids = df_slab.loc[df_slab[cluster_col] == c, 'Nuclear_ID'].values
+#                 rgb = hex_to_rgb(CLUSTER_COLORS[c], normalize=True)
+#                 for cid in ids:
+#                     paint_cell(overlay, cid, rgb, proj_axis)
+#         else:
+#             for _, row in df_slab.iterrows():
+#                 val = row[cluster_col]
+#                 if not np.isnan(val):
+#                     paint_cell(overlay, row['Nuclear_ID'], cmap(norm(val))[:3], proj_axis)
+
+#         ax_i.imshow(mip_bg, cmap='gray', alpha=0.3, origin='lower', aspect='auto')
+#         ax_i.imshow(np.clip(overlay, 0, 1), alpha=0.8, origin='lower', aspect='auto')
+#         if proj_title:
+#             ax_i.set_title(proj_title, fontsize=11)
+#         ax_i.axis('off')
+        
+#         # Add z-range text below the plot
+#         z_text = f"Z: {int(z_range[0])} - {int(z_range[1])}"
+#         ax_i.text(0.5, -0.05, z_text, transform=ax_i.transAxes, 
+#                   ha='center', va='top', fontsize=10, color='white')
+    
+#     if use_discrete:
+#         legend_elements = [Patch(facecolor=CLUSTER_COLORS[c], label=f'Cluster {c}') for c in clusters]
+#         legend = axes[0].legend(handles=legend_elements, loc='upper left', 
+#                                 frameon=False, labelcolor='white')
+#     elif show_colorbar:
+#         sm = ScalarMappable(cmap=cmap, norm=norm)
+#         sm.set_array([])
+#         cbar = fig.colorbar(sm, ax=axes, orientation='vertical', fraction=0.02, pad=0.04)
+#         cbar.set_label(cluster_col, fontsize=10)
+
+#     # fig_title = title if title else f'Cells colored by {cluster_col}'
+#     # fig.suptitle(fig_title, fontsize=14)
+    
+#     if save_dir is not None:
+#         save_vectorized(save_dir, fig, 'nuclear_masks_mip')
+    
+#     return fig, axes[0]
 
 
 def view_somite_microscopy(result, somite_df):
@@ -476,7 +622,6 @@ def plot_somite_mip(somite_df,
         title = ''
     else:
         title = f'Somite ID: {somite_id}, Side: {somite_side}, Stage: {somite_stage}'
-    
     fig, ax_out = plot_nuclear_masks(
         mask_roi_filtered,
         somite_df,
@@ -486,12 +631,7 @@ def plot_somite_mip(somite_df,
         z_factor=z_factor,
         title=title,
         ax=ax
-        # save_dir=save_dir
     )
-    
-    # if save_dir is not None:
-    #     save_vectorized(save_dir, fig, f'somite_{somite_id}_cluster_mip')
-    
     return fig, ax_out
 
 def plot_positions_3d(df_features, pos_col):
@@ -712,3 +852,164 @@ def plot_class_distributions(df, cluster_col):
 #     plot_feature_distribution_by_cluster(left_df, feature_col, axes1[i])
 #     plot_feature_distribution_by_cluster(right_df, feature_col, axes2[i])
 # plt.show()
+
+
+# =============================================================================
+# feature_extract figures
+# =============================================================================
+
+def plot_position_scatter(positions_df, save_dir, embryo_id,
+                          camera_angles=None, camera_center=None,
+                          camera_zoom=None, camera_s_scale=4.0,
+                          n_sample=70_000, seed=42):
+    """Save a Scatter3d plot for each biological-position column.
+
+    When *camera_angles*, *camera_center*, and *camera_zoom* are provided the
+    figures use a fixed Napari-derived camera so every run produces the same
+    viewpoint.
+    """
+    import plotly.graph_objects as go
+
+    n = min(n_sample, len(positions_df))
+    sample = positions_df.sample(n=n, seed=seed)
+
+    x_vals = sample['Centroid_X'].to_numpy()
+    y_vals = sample['Centroid_Y'].to_numpy()
+    z_vals = sample['Centroid_Z'].to_numpy()
+
+    camera = None
+    if camera_angles and camera_center and camera_zoom:
+        camera = napari_camera_to_plotly(
+            angles=camera_angles,
+            center=camera_center,
+            zoom=camera_zoom,
+            s_scale=camera_s_scale,
+            x_vals=x_vals, y_vals=y_vals, z_vals=z_vals,
+        )
+
+    fig_dir = Path(save_dir) / 'figures'
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    for col in ('pos_AP', 'pos_LR', 'pos_DV'):
+        color_vals = sample[col].to_numpy()
+        fig = go.Figure(data=go.Scatter3d(
+            x=x_vals, y=y_vals, z=z_vals,
+            mode='markers',
+            marker=dict(
+                size=3, color=color_vals, opacity=1,
+                colorbar=dict(title=col, len=0.5, x=0.8, y=0.5),
+                cmid=0 if col == 'pos_LR' else None,
+            ),
+        ))
+        layout_kwargs = dict(
+            title=None,
+            scene=dict(
+                xaxis_title='X', yaxis_title='Y', zaxis_title='Z',
+                aspectmode='data',
+            ),
+            height=800,
+        )
+        if camera is not None:
+            layout_kwargs['scene_camera'] = camera
+        fig.update_layout(**layout_kwargs)
+
+        out_path = fig_dir / f'{embryo_id}_{col}.png'
+        fig.write_image(str(out_path), width=1000, height=1000, scale=3)
+        logger.info(f"Saved position scatter plot to {out_path}")
+
+
+def plot_alignment_mips(somite_df, nuclear_mask, somite_mask, save_dir,
+                        stage=13, z_factor=0.05,
+                        eccentricity_min=0.3):
+    """Render the L+R somite pair at one stage as 3 MIP panels colored by
+    align_AP, align_DV, align_LR.
+
+    All three panels share a fixed colormap range [0, 1] so they are directly
+    comparable. A thin Z slab (controlled by ``z_factor``) is used to avoid
+    collapsing the full stage span into a single projection. Nuclei with
+    ``eccentricity < eccentricity_min`` are dropped before plotting, since
+    the major-axis direction of a near-spherical nucleus is dominated by
+    eigenvector noise.
+    """
+    if hasattr(somite_df, "to_pandas"):
+        somite_df = somite_df.to_pandas()
+
+    align_cols = ["align_AP", "align_DV", "align_LR"]
+    missing = [c for c in align_cols if c not in somite_df.columns]
+    if missing:
+        logger.warning(f"Missing alignment columns {missing}; skipping alignment MIP")
+        return
+
+    sub_df = somite_df[somite_df["Somite_Stage"] == stage].copy()
+    if sub_df.empty:
+        logger.warning(f"No nuclei found for Somite_Stage={stage}; skipping alignment MIP")
+        return
+
+    if "eccentricity" in sub_df.columns:
+        n_before = len(sub_df)
+        sub_df = sub_df[sub_df["eccentricity"] >= eccentricity_min].copy()
+        logger.info(
+            f"Eccentricity filter ≥ {eccentricity_min}: "
+            f"{len(sub_df)}/{n_before} nuclei retained"
+        )
+        if sub_df.empty:
+            logger.warning(
+                f"No nuclei pass eccentricity ≥ {eccentricity_min} at stage {stage}"
+            )
+            return
+    else:
+        logger.warning(
+            "No 'eccentricity' column; plotting all nuclei (including round ones)"
+        )
+
+    n_left = (sub_df["Side"].str.lower() == "left").sum()
+    n_right = (sub_df["Side"].str.lower() == "right").sum()
+    logger.info(f"Rendering alignment MIPs for stage {stage} "
+                f"({n_left} left + {n_right} right nuclei)")
+
+    result = load_somite_roi(
+        nuclear_mask_da=nuclear_mask,
+        somite_mask=somite_mask,
+        df_features=sub_df,
+    )
+
+    nuclear_mask_roi = result["nuclear_mask_da"].compute()
+    actual = result["roi_shape"]
+    nuclear_mask_roi = nuclear_mask_roi[:actual[0], :actual[1], :actual[2]]
+    mask_roi_filtered = np.where(result["somite_binary"], nuclear_mask_roi, 0)
+
+    z_min, z_max = sub_df["Centroid_Z"].min(), sub_df["Centroid_Z"].max()
+    z_center = (z_min + z_max) / 2
+    z_half = z_factor * (z_max - z_min)
+    z_range = (z_center - z_half, z_center + z_half)
+    logger.info(
+        f"Z slab: {int(z_range[0])}–{int(z_range[1])} "
+        f"({int(2 * z_half)} slices, center {int(z_center)})"
+    )
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    for ax, col in zip(axes, align_cols):
+        plot_nuclear_masks(
+            mask_roi_filtered,
+            sub_df,
+            col,
+            z_range=z_range,
+            z_offset=result["z_offset"],
+            ax=ax,
+            vmin=0.0,
+            vmax=1.0,
+            show_colorbar=False,
+        )
+        ax.set_title(col, color="white", fontsize=11)
+
+    sm = ScalarMappable(cmap=plt.cm.viridis, norm=Normalize(vmin=0.0, vmax=1.0))
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=axes, orientation="vertical",
+                        fraction=0.02, pad=0.04)
+    cbar.set_label("|direction cosine|", fontsize=10, color="white")
+    cbar.ax.tick_params(colors="white")
+
+    fig.suptitle(f"Stage {stage} — somite alignment", color="white")
+    save_vectorized(save_dir, fig, f"stage_{stage}_alignment_mip", transparent=True)
+    plt.close(fig)
+    logger.info(f"Saved alignment MIP for stage {stage}")

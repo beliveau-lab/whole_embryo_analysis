@@ -17,11 +17,13 @@ from whole_embryo_analysis.somite_analysis.bio_frame import (
     compute_frenet_from_csv,
     plot_frenet_frame,
     project_points_to_anatomy,
+    project_points_to_anatomy_vectorized,
+    fix_foldback,
     project_points_to_frenet,
     compute_hybrid_frame,
 )
 from whole_embryo_analysis.utils.dask_utils import setup_dask_sge_cluster, shutdown_dask
-from whole_embryo_analysis.utils.viz import save_vectorized
+from whole_embryo_analysis.utils.viz import save_vectorized, napari_camera_to_plotly
 from whole_embryo_analysis.utils.scale_resolution import to_s0, from_s0, S3_SCALE, S4_SCALE
 
 logger = logging.getLogger(__name__)
@@ -78,20 +80,57 @@ def build_frenet_frame(spline_csv_path, smoothing=2.0):
     return frame
 
 
-def global_frame_visualization(frame, somite_mask, save_dir, frame_type='anatomical'):
+def global_frame_visualization(frame, somite_mask, save_dir, embryo_id=None,
+                               frame_type='anatomical', somite_lut=None,
+                               camera_angles=None, camera_center=None,
+                               camera_zoom=None, camera_s_scale=4.0):
+    somite_centroids = None
+    if somite_lut is not None:
+        centroids_df = get_somite_centroids(somite_mask, somite_lut)
+        somite_centroids = centroids_df[['Centroid_Z', 'Centroid_Y', 'Centroid_X']].to_numpy()
+
     if isinstance(frame, FrenetFrame):
         fig = plot_frenet_frame(frame, somite_mask)
-    else:
-        fig = plot_anatomical_frame(frame, title='Anatomical Frame (Somite-based)')
+        if save_dir is not None:
+            save_vectorized(save_dir, fig, 'frame_visualization.png')
+            logger.info(f"Saved frame visualization to {save_dir}")
+        return fig
+
+    fig = plot_frame_3d(
+        frame, somite_centroids=somite_centroids,
+        title='Anatomical Frame (Somite-based)',
+    )
+
+    curve = frame.curve_dense
+    pts = curve if somite_centroids is None else np.vstack([curve, somite_centroids])
+    x_vals = pts[:, 2]
+    y_vals = pts[:, 1]
+    z_vals = pts[:, 0]
+
+    if camera_angles and camera_center and camera_zoom:
+        camera = napari_camera_to_plotly(
+            angles=camera_angles,
+            center=camera_center,
+            zoom=camera_zoom,
+            s_scale=camera_s_scale,
+            x_vals=x_vals, y_vals=y_vals, z_vals=z_vals,
+        )
+        fig.update_layout(scene_camera=camera)
+
     if save_dir is not None:
-        save_vectorized(save_dir, fig, 'frame_visualization.png')
-        logger.info(f"Saved frame visualization to {save_dir}")
-    return fig   
+        fig_dir = Path(save_dir) / 'figures'
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        fname = f'{embryo_id}_frame_visualization.png' if embryo_id else 'frame_visualization.png'
+        out_path = fig_dir / fname
+        fig.write_image(str(out_path), width=1000, height=1000, scale=3)
+        logger.info(f"Saved frame visualization to {out_path}")
+    return fig
 
 
 def compute_biological_positions(nuclear_df, frame,
                                  z_col='Centroid_Z', y_col='Centroid_Y',
-                                 x_col='Centroid_X'):
+                                 x_col='Centroid_X',
+                                 foldback_k=500, foldback_n_iter=10):
     centroids = nuclear_df.select([z_col, y_col, x_col]).to_numpy()
 
     if isinstance(frame, FrenetFrame):
@@ -103,12 +142,30 @@ def compute_biological_positions(nuclear_df, frame,
             pl.Series('pos_tangent', result['tangent_coord']),
         )
     else:
-        result = project_points_to_anatomy(centroids, frame, return_frames=True)
+        pos_AP, pos_LR, pos_DV, dist, spline_idx = \
+            project_points_to_anatomy_vectorized(centroids, frame)
+
+        if foldback_n_iter > 0:
+            logger.info(f"Fixing fold-back (k={foldback_k}, n_iter={foldback_n_iter})")
+            pos_AP, pos_LR, pos_DV, dist = fix_foldback(
+                centroids, frame, pos_AP, spline_idx,
+                k=foldback_k, n_iter=foldback_n_iter,
+            )
+
         nuclear_df = nuclear_df.with_columns(
-            pl.Series('pos_AP', result['pos_AP']),
-            pl.Series('pos_LR', result['pos_LR']),
-            pl.Series('pos_DV', result['pos_DV']),
+            pl.Series('pos_AP', pos_AP),
+            pl.Series('pos_LR', pos_LR),
+            pl.Series('pos_DV', pos_DV),
         )
+
+        result = {
+            'local_frames': np.stack([
+                np.column_stack([
+                    frame.T[idx], frame.LR[idx], frame.DV[idx]
+                ])
+                for idx in (frame.kdt.query(centroids)[1])
+            ])
+        }
 
     nuc_ids = nuclear_df['Nuclear_ID'].to_list()
     local_frames = {
@@ -122,19 +179,51 @@ def compute_biological_positions(nuclear_df, frame,
 # Feature Computation
 # =============================================================================
 
-def add_depth(df, somite_mask, somite_id, voxel_size=(1, 1, 1), padding=10):
+def add_depth(df, somite_mask, somite_id, voxel_size=(1, 1, 1), padding=10,
+              bbox_slice=None):
+    """Add signed depth relative to a single somite's surface.
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        Nuclei to annotate.
+    somite_mask : np.ndarray
+        Full labeled somite mask (ZYX).
+    somite_id : int
+        Label to measure depth for.
+    voxel_size : tuple
+        Physical spacing passed to ``distance_transform_edt``.
+    padding : int
+        Voxels of padding around the somite bbox when cropping the ROI.
+    bbox_slice : tuple[slice, slice, slice] or None
+        Precomputed ROI for this label (e.g. from ``scipy.ndimage.find_objects``).
+        Strongly preferred: avoids scanning the full mask with ``np.argwhere``
+        once per somite, which is O(mask_volume) per call.
+    """
     somite_id_int = int(float(somite_id))
-    somite_coords = np.argwhere(somite_mask == somite_id_int)
 
-    if len(somite_coords) == 0:
-        logger.warning(f"Somite {somite_id} not found in mask")
-        return df.with_columns(
-            pl.lit(float('nan')).alias('depth_raw'),
-            pl.lit(float('nan')).alias('depth_normalized'),
+    if bbox_slice is None:
+        # Fallback: scan the full mask for this label (slow, O(mask_volume)).
+        somite_coords = np.argwhere(somite_mask == somite_id_int)
+        if len(somite_coords) == 0:
+            logger.warning(f"Somite {somite_id} not found in mask")
+            return df.with_columns(
+                pl.lit(float('nan')).alias('depth_raw'),
+                pl.lit(float('nan')).alias('depth_normalized'),
+            )
+        mins = np.maximum(somite_coords.min(axis=0) - padding, 0)
+        maxs = np.minimum(somite_coords.max(axis=0) + 5 + padding, somite_mask.shape)
+    else:
+        mask_shape = np.asarray(somite_mask.shape)
+        mins = np.array(
+            [max(int(s.start) - padding, 0) for s in bbox_slice],
+            dtype=np.int64,
         )
-
-    mins = np.maximum(somite_coords.min(axis=0) - padding, 0)
-    maxs = np.minimum(somite_coords.max(axis=0) + 5 + padding, somite_mask.shape)
+        maxs = np.array(
+            [min(int(s.stop) + padding + 5, mask_shape[i])
+             for i, s in enumerate(bbox_slice)],
+            dtype=np.int64,
+        )
 
     roi = somite_mask[mins[0]:maxs[0], mins[1]:maxs[1], mins[2]:maxs[2]]
     binary_mask = (roi == somite_id_int)
@@ -193,7 +282,7 @@ def compute_orientation_features(voxels, local_frame):
     }
 
 
-def process_spatial_group(group_df, nuclear_mask, local_frames):
+def process_spatial_group(group_df, nuclear_mask_path, n5_subpath, local_frames_pair):
     if group_df.is_empty():
         return {}
 
@@ -204,13 +293,25 @@ def process_spatial_group(group_df, nuclear_mask, local_frames):
     xstart = int(group_df["x0"].min())
     xend = int(group_df["x1"].max())
 
-    mask_roi = nuclear_mask[zstart:zend, ystart:yend, xstart:xend]
-    if hasattr(mask_roi, 'compute'):
-        mask_roi = mask_roi.compute()
+    # Open zarr/n5 on the worker directly instead of receiving a scattered Dask
+    # array and calling .compute() inside a task — avoids nested scheduling and
+    # does not require serializing the full zarr task graph to every worker.
+    import zarr
+    if str(nuclear_mask_path).endswith(".n5"):
+        store = zarr.N5Store(nuclear_mask_path)
+        arr = zarr.open_array(store=store, path=n5_subpath, mode="r")
+    elif n5_subpath:
+        arr = zarr.open(nuclear_mask_path, mode="r")[n5_subpath]
+    else:
+        arr = zarr.open(nuclear_mask_path, mode="r")
 
+    mask_roi = np.asarray(arr[zstart:zend, ystart:yend, xstart:xend])
+
+    ids, mats = local_frames_pair
     results = {}
     for label in group_df["label"].cast(pl.Int64).to_list():
-        if label not in local_frames:
+        pos = np.searchsorted(ids, label)
+        if pos >= len(ids) or int(ids[pos]) != int(label):
             continue
 
         obj_slice = (mask_roi == label).astype(np.uint8)
@@ -221,7 +322,7 @@ def process_spatial_group(group_df, nuclear_mask, local_frames):
         if len(vox) < 4:
             continue
 
-        results[label] = compute_orientation_features(vox, local_frames[label])
+        results[int(label)] = compute_orientation_features(vox, mats[pos])
 
     return results
 
@@ -232,13 +333,14 @@ def process_spatial_group(group_df, nuclear_mask, local_frames):
 
 class SomiteAnalyzer:
 
-    def __init__(self, nuclear_mask, bbox_df, dask_params):
-        self.nuclear_mask = nuclear_mask
+    def __init__(self, nuclear_mask_path, bbox_df, dask_params, n5_subpath=None):
+        self.nuclear_mask_path = str(nuclear_mask_path)
+        self.n5_subpath = n5_subpath
         self.bbox_df = bbox_df
         self.dask_params = dask_params
         self.client = None
         self.cluster = None
-        self.scattered_mask = None
+        self.scattered_frames = None
         self._setup_attempts = 0
         self._max_setup_attempts = 3
 
@@ -274,9 +376,11 @@ class SomiteAnalyzer:
                 dashboard_port=self.dask_params.get('dashboard_port'),
             )
             logger.info(f"Dask dashboard: {self.client.dashboard_link}")
-
-            [self.scattered_mask] = self.client.scatter([self.nuclear_mask], broadcast=True)
-            logger.info("Nuclear mask scattered to workers")
+            logger.info(
+                "Workers will open nuclear mask directly: %s%s",
+                self.nuclear_mask_path,
+                f" [{self.n5_subpath}]" if self.n5_subpath else "",
+            )
             return True
         except Exception as e:
             logger.error(f"Cluster setup failed: {e}")
@@ -306,35 +410,83 @@ class SomiteAnalyzer:
                 logger.error(f"Shutdown error: {e}")
         self.client = None
         self.cluster = None
-        self.scattered_mask = None
+        self.scattered_frames = None
 
-    def process_somite(self, somite_nuclear_df, local_frames):
+    def scatter_local_frames(self, local_frames):
+        """Scatter the local-frames mapping to all workers as parallel numpy arrays.
+
+        Broadcasting a Python dict of many small ndarrays is dominated by
+        per-key cloudpickle overhead and becomes very slow on large embryos
+        (100k+ somite nuclei). Packing into sorted (ids, mats) arrays
+        serializes in one shot.
+        """
+        if self.client is None:
+            logger.warning("Cannot scatter frames: no Dask client")
+            return
+        if not local_frames:
+            ids = np.empty((0,), dtype=np.int64)
+            mats = np.empty((0, 3, 3), dtype=np.float64)
+        else:
+            sorted_items = sorted(local_frames.items())
+            ids = np.fromiter(
+                (int(k) for k, _ in sorted_items),
+                dtype=np.int64,
+                count=len(sorted_items),
+            )
+            mats = np.stack([v for _, v in sorted_items]).astype(np.float64, copy=False)
+        [self.scattered_frames] = self.client.scatter([(ids, mats)], broadcast=True)
+        logger.info("Local frames scattered to workers (%d nuclei)", len(ids))
+
+    def process_all_somites(self, somite_nuclear_df):
+        """Compute orientation features for every somite nucleus in one Dask sweep.
+
+        Partitions the full somite-nuclei bbox table by chunk exactly once and
+        submits all chunk-groups as Dask futures, so each mask chunk is loaded
+        at most once and workers stay saturated. Requires ``scatter_local_frames``
+        to have been called first.
+        """
         from dask.distributed import as_completed
 
         if not self.ensure_cluster_ready():
             logger.error("Cluster unavailable")
             return pl.DataFrame()
 
-        somite_ids = set(somite_nuclear_df['Nuclear_ID'].to_list())
-        somite_bbox_df = self.bbox_df.filter(pl.col('label').is_in(list(somite_ids)))
-
-        if len(somite_bbox_df) == 0:
+        if self.scattered_frames is None:
+            logger.error("Local frames not scattered; call scatter_local_frames first")
             return pl.DataFrame()
 
-        try:
-            groups = somite_bbox_df.partition_by(["cz", "cy", "cx"], maintain_order=True)
-            [scattered_frames] = self.client.scatter([local_frames], broadcast=True)
+        nuclear_ids = somite_nuclear_df['Nuclear_ID'].to_list()
+        bbox_subset = self.bbox_df.filter(pl.col('label').is_in(nuclear_ids))
 
+        if len(bbox_subset) == 0:
+            return pl.DataFrame()
+
+        groups = bbox_subset.partition_by(["cz", "cy", "cx"], maintain_order=True)
+        logger.info(
+            f"Submitting {len(groups)} chunk-groups covering {len(bbox_subset)} nuclei"
+        )
+
+        try:
             futures = [
-                self.client.submit(process_spatial_group, gdf, self.scattered_mask, scattered_frames)
+                self.client.submit(
+                    process_spatial_group,
+                    gdf,
+                    self.nuclear_mask_path,
+                    self.n5_subpath,
+                    self.scattered_frames,
+                )
                 for gdf in groups
             ]
 
             all_results = {}
+            n_done = 0
             for batch in as_completed(futures, with_results=True).batches():
                 for _, result in batch:
                     if result:
                         all_results.update(result)
+                n_done += len(batch)
+                if n_done % 100 == 0 or n_done == len(futures):
+                    logger.info(f"  {n_done}/{len(futures)} chunk-groups done")
 
             if all_results:
                 records = [{'Nuclear_ID': k, **v} for k, v in all_results.items()]
@@ -342,7 +494,7 @@ class SomiteAnalyzer:
             return pl.DataFrame()
 
         except Exception as e:
-            logger.error(f"Error processing somite: {e}")
+            logger.error(f"Error processing somites: {e}")
             if "worker" in str(e).lower():
                 self.restart_cluster()
             return pl.DataFrame()

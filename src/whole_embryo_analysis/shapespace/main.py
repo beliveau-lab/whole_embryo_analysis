@@ -2,6 +2,7 @@ import argparse
 import logging
 
 from whole_embryo_analysis.shapespace.shapespace import ShapeSpace
+from whole_embryo_analysis.utils.io import scan_features
 import polars as pl
 
 """
@@ -30,13 +31,14 @@ def load_shcoeffs(full_path, outlier_path, id_name):
         DataFrame of shcoeffs indexed by id_name
     """
     logger.info("Loading data...")
-    query = pl.scan_csv(full_path)
+    query = scan_features(full_path)
 
     if outlier_path is not None:
         outlier_ids = pl.read_csv(outlier_path)[id_name].to_list()
         query = query.filter(~pl.col(id_name).is_in(outlier_ids))
 
     schema = query.collect_schema()
+    print(schema)
     shcoeff_cols = [c for c in schema.names() if 'shcoeffs_' in c]
     needed_cols = [id_name] + shcoeff_cols
 
@@ -137,3 +139,7 @@ def main():
 if __name__ == "__main__":
     main()
 
+"""
+python3 main.py --feature_csv /net/beliveau/vol2/instrument/E9.5_306/Zoom_306/dataset_fused_features-JGseg-030926.csv --outlier_path /net/beliveau/vol2/instrument/E9.5_306/Zoom_306/analysis_pipeline/KDE/outliers.csv --save_dir /net/beliveau/vol1/home/msforman/msf_project/whole_embryo_analysis2/logs/ --str_tag E9.5_306 --id_name Nuclear_ID --lmax 16 --num_pcs 6 --store_results --generate_figures
+python3 main.py --feature_csv /net/beliveau/vol2/instrument/E9.5_306/Zoom_306/dataset_fused_features_Julia_FT_Feb26.csv --outlier_path /net/beliveau/vol2/instrument/E9.5_306/Zoom_306/analysis_pipeline/KDE/outliers.csv --save_dir /net/beliveau/vol1/home/msforman/msf_project/whole_embryo_analysis2/logs/ --str_tag E9.5_306_Julia_FT --id_name Nuclear_ID --lmax 16 --num_pcs 6 --store_results --generate_figures
+"""

@@ -12,6 +12,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import zarr
 import dask.array as da
 
@@ -51,29 +52,55 @@ def load_n5_zarr_array(
         return da.from_zarr(path, chunks=chunks)
     raise ValueError(f"Unsupported array format (expected .n5 or .zarr): {path}")
 
-def load_data(mask_path, image_zarr_root, channels, chunks=None, n5_subpath=None):
-    logger.info(f"Loading mask from: {mask_path}")
-    mask_array = load_n5_zarr_array(mask_path, n5_subpath=n5_subpath, chunks=chunks)
-    logger.info(f"Loaded Mask (ZYX assumed): Shape={mask_array.shape}, Chunks={mask_array.chunks}, Dtype={mask_array.dtype}")
-    image_arrays = {}
-    logger.info(f"Loading image channels {channels} from: {image_zarr_root}")
-    for ch in channels:
-        ch_path = os.path.join(image_zarr_root, f"ch{ch}", "s0")
-        logger.info(f"Loading channel {ch} from: {ch_path}")
-        try:
-            ch_arr = zarr.open(ch_path, mode='r')
-            image_arrays[ch] = ch_arr
-            logger.info(f"Loaded channel {ch}: Shape={ch_arr.shape}, Dtype={ch_arr.dtype}")
-        except Exception as e:
-            logger.error(f"Failed to load channel {ch} from {ch_path}: {e}")
-            raise
-    
-    
-def add_chunk_indices(df_bboxes: pd.DataFrame, chunk_sizes: tuple) -> pd.DataFrame:
-    """Add chunk index columns (cz, cy, cx) using bbox centroid and given chunk sizes."""
+
+# =============================================================================
+# Feature-table I/O (CSV or Parquet, transparent dispatch)
+# =============================================================================
+
+_PARQUET_SUFFIXES = (".parquet", ".pq")
+
+
+def _is_parquet(path: str) -> bool:
+    return str(path).lower().endswith(_PARQUET_SUFFIXES)
+
+
+def scan_features(path: str) -> pl.LazyFrame:
+    """Return a polars LazyFrame for either a .csv or .parquet feature table.
+
+    Prefer this over calling ``pl.scan_csv`` directly so the pipeline can
+    transparently consume a Parquet-converted feature table (which is far
+    faster to load for 3TB-scale samples).
+    """
+    path = str(path)
+    if _is_parquet(path):
+        return pl.scan_parquet(path)
+    return pl.scan_csv(path)
+
+
+def read_features(path: str) -> pl.DataFrame:
+    """Eagerly read a feature table in either .csv or .parquet format."""
+    path = str(path)
+    if _is_parquet(path):
+        return pl.read_parquet(path)
+    return pl.read_csv(path)
+
+
+def add_chunk_indices(df_bboxes, chunk_sizes: tuple):
+    """Add chunk index columns (cz, cy, cx) using bbox centroid and given chunk sizes.
+
+    Accepts either a pandas or polars DataFrame and returns the same type.
+    """
     cz_size = int(chunk_sizes[0][0])
     cy_size = int(chunk_sizes[1][0])
     cx_size = int(chunk_sizes[2][0])
+
+    if isinstance(df_bboxes, pl.DataFrame):
+        return df_bboxes.with_columns(
+            (((pl.col("z0") + pl.col("z1")) // 2) // cz_size).cast(pl.Int64).alias("cz"),
+            (((pl.col("y0") + pl.col("y1")) // 2) // cy_size).cast(pl.Int64).alias("cy"),
+            (((pl.col("x0") + pl.col("x1")) // 2) // cx_size).cast(pl.Int64).alias("cx"),
+        )
+
     df_bboxes = df_bboxes.copy()
     df_bboxes["cz"] = (((df_bboxes["z0"] + df_bboxes["z1"]) // 2) // cz_size).astype(np.int64)
     df_bboxes["cy"] = (((df_bboxes["y0"] + df_bboxes["y1"]) // 2) // cy_size).astype(np.int64)
@@ -81,8 +108,11 @@ def add_chunk_indices(df_bboxes: pd.DataFrame, chunk_sizes: tuple) -> pd.DataFra
     return df_bboxes
 
 
-def get_bounds(group_df: pd.DataFrame) -> tuple[int, int, int, int, int, int]:
-    """Return (zstart, zend, ystart, yend, xstart, xend) from bbox columns."""
+def get_bounds(group_df) -> tuple[int, int, int, int, int, int]:
+    """Return (zstart, zend, ystart, yend, xstart, xend) from bbox columns.
+
+    Accepts either a pandas or polars DataFrame.
+    """
     zstart = int(group_df["z0"].min())
     zend = int(group_df["z1"].max())
     ystart = int(group_df["y0"].min())

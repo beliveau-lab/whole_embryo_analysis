@@ -24,6 +24,7 @@ dependencies = [
     "colorcet",
     "dask-jobqueue",
     "distributed",
+    "KDEpy",
 ]
 
 [project.optional-dependencies]

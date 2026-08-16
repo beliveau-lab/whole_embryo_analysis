@@ -195,10 +195,10 @@ def reconstruct(mat, lrec=0):
     return mesh, img
 
 def plot_reconstruction(obj_id, title, dir, coeffs, show_title=False, lmax=16):
-    mat = get_coeffs(obj_id, features_path)  # Fixed function name
+    mat = get_coeffs(obj_id, coeffs)  # Fixed function name
     mesh_rec, img_rec = reconstruct(mat, lrec=lmax)
     rec_tuple = (mesh_rec, img_rec)
-    plot_object(rec_tuple, title, dir, show_title=show_title)    
+    plot_object(rec_tuple, title, dir, show_title=show_title, save_image=False)    
     return mesh_rec
     
 def find_specific_object(obj_id, df_bboxes, id_name='Nuclear_ID'):

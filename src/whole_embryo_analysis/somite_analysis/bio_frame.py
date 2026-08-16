@@ -380,6 +380,88 @@ def project_points_to_anatomy(centroids, frame, return_frames=False):
     return result
 
 
+def project_points_to_anatomy_vectorized(centroids, frame):
+    """Vectorized projection onto the anatomical frame via nearest-point lookup.
+
+    Returns (pos_AP, pos_LR, pos_DV, dist, idx) where *idx* are indices into
+    ``frame.curve_dense`` / ``frame.u_dense``.
+    """
+    centroids = np.atleast_2d(centroids)
+    dist, idx = frame.kdt.query(centroids)
+
+    curve_pts = frame.curve_dense[idx]
+    V = centroids - curve_pts
+
+    pos_AP = frame.u_dense[idx]
+    pos_LR = np.sum(V * frame.LR[idx], axis=1)
+    pos_DV = np.sum(V * frame.DV[idx], axis=1)
+
+    return pos_AP, pos_LR, pos_DV, dist, idx
+
+def fix_foldback(coords, frame, ap, spline_idx,                                                                                                                                                           
+                   k=500, threshold=0.1, n_iter=10,                                                                                                                                                         
+                   min_outliers=100):                                                                                                                                                        
+    """...                                                
+    min_outliers : stop when fewer than this many nuclei need re-projecting.                                                                                                                              
+    plateau_tol  : stop when the new count isn't at least `plateau_tol`                                                                                                                                   
+                    smaller than the previous one (0 = stop as soon as                                                                                                                                     
+                    progress stalls or reverses).                                                                                                                                                          
+    """                                                                                                                                                                                                   
+    n_points = len(coords)                                
+    k = min(k, n_points)                                                                                                                                                                                  
+    if k < 2:                                             
+        V = coords - frame.curve_dense[spline_idx]                                                                                                                                                        
+        pos_LR = np.sum(V * frame.LR[spline_idx], axis=1)                                                                                                                                                 
+        pos_DV = np.sum(V * frame.DV[spline_idx], axis=1)                                                                                                                                                 
+        return ap.copy(), pos_LR, pos_DV, np.linalg.norm(V, axis=1)                                                                                                                                       
+                                                                                                                                                                                                        
+    nuc_kdt = cKDTree(coords)                             
+    _, nbr_idx = nuc_kdt.query(coords, k=k)                                                                                                                                                               
+                                                                                                                                                                                                        
+    ap_fixed = ap.copy()                                                                                                                                                                                  
+    idx_fixed = spline_idx.copy()                                                                                                                                                                         
+    prev_outliers = np.inf                                                                                                                                                                                
+                                                        
+    for iteration in range(n_iter):
+        nbr_ap = ap_fixed[nbr_idx[:, 1:]]
+        median_nbr = np.median(nbr_ap, axis=1)                                                                                                                                                            
+        outlier_mask = np.abs(ap_fixed - median_nbr) > threshold                                                                                                                                          
+        n_outliers = int(outlier_mask.sum())                                                                                                                                                              
+                                                                                                                                                                                                        
+        if n_outliers == 0:                               
+            logger.info(f"fix_foldback converged at iter {iteration + 1}")                                                                                                                                
+            break                                                                                                                                                                                         
+        if n_outliers < min_outliers:
+            logger.info(f"fix_foldback iter {iteration + 1}: "                                                                                                                                            
+                        f"{n_outliers} < min_outliers={min_outliers}, stopping")                                                                                                                          
+            break
+        # if prev_outliers - n_outliers <= plateau_tol:                                                                                                                                                     
+        #     logger.info(f"fix_foldback iter {iteration + 1}: plateau "                                                                                                                                    
+        #                 f"({prev_outliers} → {n_outliers}), stopping")                                                                                                                                    
+        #     break                                                                                                                                                                                         
+                                                                                                                                                                                                        
+        for i in np.where(outlier_mask)[0]:               
+            u_lo = max(0, median_nbr[i] - 0.1)
+            u_hi = min(1, median_nbr[i] + 0.1)                                                                                                                                                            
+            u_mask = (frame.u_dense >= u_lo) & (frame.u_dense <= u_hi)
+            if u_mask.any():                                                                                                                                                                              
+                local_dists = np.linalg.norm(             
+                    frame.curve_dense[u_mask] - coords[i], axis=1                                                                                                                                         
+                )                                         
+                new_idx = np.where(u_mask)[0][np.argmin(local_dists)]                                                                                                                                     
+                ap_fixed[i] = frame.u_dense[new_idx]                                                                                                                                                      
+                idx_fixed[i] = new_idx                                                                                                                                                                    
+                                                                                                                                                                                                        
+        logger.info(f"fix_foldback iter {iteration + 1}: re-projected {n_outliers} nuclei")                                                                                                               
+        prev_outliers = n_outliers                        
+                                                                                                                                                                                                        
+    V = coords - frame.curve_dense[idx_fixed]             
+    pos_LR = np.sum(V * frame.LR[idx_fixed], axis=1)
+    pos_DV = np.sum(V * frame.DV[idx_fixed], axis=1)                                                                                                                                                      
+    dist = np.linalg.norm(V, axis=1)
+                                                                                                                                                                                                            
+    return ap_fixed, pos_LR, pos_DV, dist                 
+
 # =============================================================================
 # Hybrid Frame (Recommended)
 # =============================================================================
@@ -432,7 +514,28 @@ def compute_hybrid_frame(somite_lut, spline_points,
     )
     lr_dense = f_lr(u_dense)
 
-    # Orthogonalize
+    # Parallel-transport LR in extrapolation regions (before first / after
+    # last somite pair) so the vector stays perpendicular to T instead of
+    # being a stale copy of the nearest endpoint.
+    idx_lo = np.searchsorted(u_dense, u_somites.min())
+    idx_hi = np.searchsorted(u_dense, u_somites.max())
+
+    def _ortho_unit(v, t):
+        v_perp = v - np.dot(v, t) * t
+        n = np.linalg.norm(v_perp)
+        return v_perp / n if n > 1e-9 else v
+
+    if idx_lo > 0:
+        lr_dense[idx_lo] = _ortho_unit(lr_dense[idx_lo], T_dense[idx_lo])
+        for i in range(idx_lo - 1, -1, -1):
+            lr_dense[i] = _ortho_unit(lr_dense[i + 1], T_dense[i])
+
+    if idx_hi < len(u_dense):
+        lr_dense[idx_hi - 1] = _ortho_unit(lr_dense[idx_hi - 1], T_dense[idx_hi - 1])
+        for i in range(idx_hi, len(u_dense)):
+            lr_dense[i] = _ortho_unit(lr_dense[i - 1], T_dense[i])
+
+    # Orthogonalize (now mainly affects the somite-interpolated region)
     lr_perp, dv, dot = _orthogonalize_lr(T_dense, lr_dense)
     logger.info(f"Hybrid frame built. Max |LR·T|: {np.abs(dot).max():.4f}")
 
@@ -496,7 +599,8 @@ def principal_axis_in_anatomy(mask, local_frame):
 # Visualization
 # =============================================================================
 
-def plot_anatomical_frame(frame, ax=None, n_frames=20, scale=50.0, title=None):
+def plot_anatomical_frame(frame, somite_centroids=None,
+                          ax=None, n_frames=20, scale=50.0, title=None):
     import matplotlib.pyplot as plt
 
     if ax is None:
@@ -510,6 +614,11 @@ def plot_anatomical_frame(frame, ax=None, n_frames=20, scale=50.0, title=None):
             color='purple', linestyle='--', linewidth=3, label='Midline/Neural tube')
     ax.scatter(frame.midpoints[:, 2], frame.midpoints[:, 1], frame.midpoints[:, 0],
                c='gray', s=100, marker='o', label='L/R midpoints')
+
+    if somite_centroids is not None:
+        sc = np.asarray(somite_centroids)
+        ax.scatter(sc[:, 2], sc[:, 1], sc[:, 0],
+                   c='orange', s=60, marker='o', label='Somite centroids')
 
     indices = np.linspace(0, len(frame.u_dense) - 1, n_frames, dtype=int)
     colors = {'T': 'red', 'LR': 'green', 'DV': 'blue'}

@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""Segmentation-error detection via robust Mahalanobis distance.
+
+Features are log-transformed and a Minimum Covariance Determinant (MCD)
+estimator fits center and scatter on the least-contaminated subset, so gross
+outliers don't pull the ellipsoid toward themselves. Per-nucleus squared
+Mahalanobis distances are thresholded against a chi-squared quantile.
+"""
 import argparse
 import logging
 import time
@@ -10,90 +17,77 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import seaborn as sns
-from scipy.stats import gaussian_kde
-from sklearn.utils import resample
+from scipy.stats import chi2
+from sklearn.covariance import MinCovDet
 
-from dask import delayed
-from whole_embryo_analysis.utils.dask_utils import (
-    setup_dask_sge_cluster, shutdown_dask, add_dask_args, dask_config_from_args,
-)
+from whole_embryo_analysis.utils.io import scan_features
+from whole_embryo_analysis.qc_outliers import qc_outliers
 
-print("Finished imports")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# Style and vector outputs
 sns.set_style("whitegrid")
 sns.set_palette(cc.glasbey_dark)
 plt.rcParams["figure.facecolor"] = "white"
 plt.rcParams["savefig.format"] = "svg"
 
-def compute_median_density(metric_x, 
-                           metric_y,
-                           x_values,
-                           y_values,
-                           rounds,
-                           n_subsample):
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Detection
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def mahalanobis_outliers(df, feature_cols, alpha=0.001, support_fraction=0.9):
+    """Flag nuclei whose robust Mahalanobis distance exceeds a chi-squared threshold.
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+    feature_cols : list[str]
+    alpha : float
+        Significance level for the chi-squared test (e.g. 0.001 = 99.9%).
+    support_fraction : float
+        Fraction of points MCD uses for the covariance estimate. 0.9 tolerates
+        up to .1 contamination.
+
+    Returns
+    -------
+    pl.Series (bool), np.ndarray, float
+        Boolean outlier mask, per-nucleus squared Mahalanobis distances, and
+        the chi-squared threshold used.
     """
-    Compute median probabilistic density estimates for datapoints specific metric pair
-    Picklable for Dask (each metric pair is computed in parallel - one core per pair)
+    data = df.select(feature_cols).to_numpy().astype(np.float64)
+    data = np.log1p(np.clip(data, 0, None))
 
-    Params:
-    ------
-        metrix_x: Name of first metric
-        metric_y: Name of second metric
-        x_values: List of first metric values
-        y_values: List of second metric values
-        rounds: Number of rounds of Monte Carlo estimation
-        n_subsample: Size of random sub sample per round
+    mcd = MinCovDet(support_fraction=support_fraction, random_state=0).fit(data)
+    d2 = mcd.mahalanobis(data)
 
-    Returns:
-    ------
-        tuple: first element is string of metric x vs y 
-             second element is list of median densities for that pair
-    """
-    n = len(x_values)
-    density_estimates = []
-    for i in range(rounds):
-        xS, yS = resample(
-            x_values, y_values,
-            replace=False,
-            n_samples=min(n_subsample, n),
-            random_state=i
-        )
-        kde = gaussian_kde(np.vstack([xS, yS]))
-        dens = kde(np.vstack([x_values, y_values]))
-        dens = dens / dens.sum()
-        density_estimates.append(dens)
-    median_densities = np.median(density_estimates, axis=0)
-    return f"{metric_x}_vs_{metric_y}", median_densities
+    threshold = chi2.ppf(1 - alpha, df=len(feature_cols))
+    mask = pl.Series("mahal_outlier", d2 > threshold)
+    return mask, d2, threshold
 
 
-class KDEOutlierDetection:
+# ═══════════════════════════════════════════════════════════════════════════════
+# Detector class
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class OutlierDetection:
     def __init__(self, params):
         self.figure_dir = params["figure_dir"]
-        self.density_thresh = params["density_thresh"]
         self.csv_path = params["csv_path"]
         self.outlier_path = params["outlier_path"]
-        self.n_subsample = params["n_subsample"]
-        self.n_rounds = params["n_rounds"]
+        self.alpha = params.get("alpha", 0.001)
 
-        self.df = None # df of original csv
-        self.df_plot = None # df of plotting data
-
-        self.normalize_factor = 1000 # factor to normalize data - bring all µm quantities to 10-1000 range
-        self.normal_color = cc.glasbey_dark[2] # consistent color schematics
+        self.normal_color = "#36454F"
         self.outlier_color = cc.glasbey_dark[0]
-        self.init_data()
 
-    def init_data(self):
-        """
-        Initalize data for KDE estimation using Polars lazy scan.
-        Only the columns needed for pairwise density estimation are loaded.
-        """
+        self.qc_nuclear_mask = params.get("qc_nuclear_mask")
+        self.qc_image_path = params.get("qc_image_path")
+        self.qc_channel = params.get("qc_channel", 2)
+        self.qc_n = params.get("qc_n", 16)
+
         self.id_col = "Nuclear_ID"
         self.feature_cols = [
             "Nuclear_Volume",
@@ -101,249 +95,168 @@ class KDEOutlierDetection:
             "Intermediate_Axis_Length",
             "Minor_Axis_Length",
         ]
-        needed = [self.id_col] + self.feature_cols
 
+        needed = [self.id_col] + self.feature_cols
         self.df = (
-            pl.scan_csv(self.csv_path)
+            scan_features(self.csv_path)
             .select(needed)
             .with_columns(pl.col(c).cast(pl.Float32) for c in self.feature_cols)
             .collect()
         )
-        logger.info(f"Using metrics: {self.feature_cols}. {len(self.df)} objects loaded")
-    
-    def permute_pairs(self):
-        """
-        Create permuted list of pairs to compute density of
+        logger.info(f"Loaded {len(self.df)} nuclei with features: {self.feature_cols}")
 
-        Returns
-        -------
-        pairs: list of tuples of feature pairs
-        """
-        cols = self.feature_cols
-        pairs = np.array(
-            [(cols[i], cols[j]) for i in range(len(cols)) for j in range(i + 1, len(cols))]
+    def workflow(self):
+        logger.info("--- Robust Mahalanobis (MCD, alpha=%.4f) ---", self.alpha)
+        mask, d2, threshold = mahalanobis_outliers(
+            self.df, self.feature_cols, alpha=self.alpha,
         )
-        logger.info(f"{len(pairs)} feature pairs")
-        return pairs
+        logger.info(f"  Chi-squared threshold (df={len(self.feature_cols)}): {threshold:.2f}")
+        logger.info(f"  Outliers: {int(mask.sum())} / {len(self.df)}")
 
-    # -------- Detection (Dask-parallel) --------
-    def workflow(self, client):
-        """
-        Parallelized detection of outliers. Main driver function to run test.
+        pcts = np.percentile(d2, [50, 90, 95, 99, 99.5, 99.9, 100])
+        logger.info(
+            "  d^2 percentiles: p50=%.1f  p90=%.1f  p95=%.1f  p99=%.1f  "
+            "p99.5=%.1f  p99.9=%.1f  max=%.1f",
+            *pcts,
+        )
 
-        Params:
-        ------
-            client: Dask distributed client
-        """
-        rounds = self.n_rounds
-        n_subsample = self.n_subsample
-        pairs = self.permute_pairs()
-        logger.info("Starting KDE Estimation (Dask)")
+        outlier_df = self.df.filter(mask).with_columns(
+            pl.Series("mahalanobis_d2", d2[mask.to_numpy()]),
+        )
+        outlier_df.write_csv(self.outlier_path)
+        logger.info(f"Saved {len(outlier_df)} outliers to {self.outlier_path}")
 
-        x_cache = {
-            col: (self.df[col] / self.normalize_factor).to_numpy().astype(np.float32)
-            for col in self.feature_cols
-        }
+        self._plot_mahalanobis_hist(d2, threshold)
+        self._plot_pairplot(mask)
 
-        delayed_tasks = []
-        for metric_x, metric_y in pairs:
-            task = delayed(compute_median_density)(
-                metric_x, metric_y, x_cache[metric_x], x_cache[metric_y],
-                rounds, n_subsample,
+        if self.qc_nuclear_mask and self.qc_image_path:
+            logger.info("Generating QC crops for random outliers")
+            qc_outliers(
+                outlier_csv=self.outlier_path,
+                feature_path=self.csv_path,
+                nuclear_mask_path=self.qc_nuclear_mask,
+                image_path=self.qc_image_path,
+                channel=self.qc_channel,
+                output_dir=str(Path(self.figure_dir) / "qc_crops"),
+                n=self.qc_n,
             )
-            delayed_tasks.append(task)
-
-        results = client.compute(delayed_tasks, sync=True)
-
-        df_density_scores = pl.DataFrame(
-            {col_name: med for col_name, med in results}
-        )
-
-        outlier_mask = self.identify_outliers(df_density_scores)
-        self.plots(df_density_scores, outlier_mask)
-
-    def identify_outliers(self, df_density_scores):
-        below = [pl.col(c) < self.density_thresh for c in df_density_scores.columns]
-        outlier_mask = df_density_scores.select(
-            pl.any_horizontal(*below).alias("is_outlier")
-        )["is_outlier"]
-
-        self.df.filter(outlier_mask).write_csv(self.outlier_path)
-        logger.info(f"Saved {outlier_mask.sum()} outliers to {self.outlier_path}")
-        return outlier_mask
-
-    # ---------- Plotting helpers (vector-first) ----------
-    def _norm_df(self) -> pd.DataFrame:
-        """Normalize feature columns and convert to pandas for seaborn."""
-        return (
-            self.df
-            .with_columns(pl.col(c) / self.normalize_factor for c in self.feature_cols)
-            .select(self.feature_cols)
-            .to_pandas()
-        )
-
-    def _save_vectorized(self, fig, plot_name: str):
-        output_path = Path(self.figure_dir) if self.figure_dir else None
-        if output_path:
-            output_path.mkdir(parents=True, exist_ok=True)
-            fig.savefig(
-                output_path / f"{plot_name}.svg",
-                format="svg",
-                bbox_inches="tight",
-                facecolor="white",
-            )
-            logger.info(f"Saved plot: {output_path / f'{plot_name}.svg'}")
-            return
         else:
-            plt.show()
+            logger.info("Skipping QC crops (--qc_nuclear_mask / --qc_image_path not set)")
 
-    def _clean_label(self, name: str) -> str:
-        return name.replace("_", " ").replace("-", " ").title()
+    # ── Plotting ──────────────────────────────────────────────────────────────
 
-    # ---------- Plots ----------
-    def outlier_summary(self, p_outlier, plot_name="outlier_summary"):
-        colors = cc.glasbey_dark
-        counts = np.array([(p_outlier[c] < self.density_thresh).sum() for c in p_outlier.columns])
-        labels = np.array([c.replace("_vs_", " vs ").replace("-", " ").replace("_", " ")
-                           for c in p_outlier.columns])
-        order = np.argsort(counts)[::-1]
-        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-        ax.barh(labels[order], counts[order], color=colors[0])
-        ax.invert_yaxis()
-        ax.set_xlabel("Number of Outliers")
-        ax.set_title("Outliers per Feature Pair")
+    def _save_fig(self, fig, name):
+        out = Path(self.figure_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out / f"{name}.svg", format="svg",
+                    bbox_inches="tight", facecolor="white")
+        logger.info(f"Saved plot: {out / name}.svg")
+        plt.close(fig)
+
+    def _plot_mahalanobis_hist(self, d2, threshold):
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+        axes[0].hist(d2, bins=200, color=self.normal_color, alpha=0.7,
+                     edgecolor="none", log=True)
+        axes[0].axvline(threshold, color=self.outlier_color, ls="--", lw=2,
+                        label=f"chi2 threshold = {threshold:.1f}")
+        axes[0].set_xlabel("Mahalanobis d$^2$")
+        axes[0].set_ylabel("Count (log scale)")
+        axes[0].set_title("Full Distribution")
+        axes[0].legend()
+
+        p95 = np.percentile(d2, 95)
+        tail = d2[d2 > p95]
+        axes[1].hist(tail, bins=100, color=self.normal_color, alpha=0.7,
+                     edgecolor="none")
+        axes[1].axvline(threshold, color=self.outlier_color, ls="--", lw=2,
+                        label=f"threshold = {threshold:.1f} ({(d2 > threshold).sum()} flagged)")
+        axes[1].set_xlabel("Mahalanobis d$^2$")
+        axes[1].set_ylabel("Count")
+        axes[1].set_title("Tail (above 95th percentile)")
+        axes[1].legend(fontsize=8)
+
+        fig.suptitle("Mahalanobis Distance Distribution", fontsize=14)
         fig.tight_layout()
-        self._save_vectorized(fig, plot_name)
-
-
-    def comprehensive_pairplot(self, outlier_mask, max_points=10000):
-        df_plot = self.df_plot
+        self._save_fig(fig, "mahalanobis_distribution")
+        
+    def _plot_pairplot(self, outlier_mask):
+        df_plot = self.df.select(self.feature_cols).to_pandas()
+        is_out = outlier_mask.to_numpy()
         df_plot["outlier_status"] = pd.Categorical(
-            np.where(outlier_mask.to_numpy(), "Outlier", "Normal"),
-            categories=["Normal", "Outlier"],
-            ordered=True,
+            np.where(is_out, "Outlier", "Normal"),
+            categories=["Normal", "Outlier"], ordered=True,
         )
-        # if len(df_plot) > max_points:
-        #     logger.info(f"Sampling {max_points} points from {len(df_plot)}")
-        #     df_plot = df_plot.sample(n=max_points, random_state=0)
-        numeric_cols = df_plot.select_dtypes(include=[np.number]).columns.tolist()
-        cols = numeric_cols + ["outlier_status"]
+
+        n_total, n_out_true = len(df_plot), int(is_out.sum())
+        pct = 100 * n_out_true / n_total
+
+        # Proportional subsample: preserves the true outlier fraction
+        target = 20_000
+        if n_total > target:
+            df_plot = df_plot.sample(n=target, random_state=0)
+
         g = sns.pairplot(
-            df_plot[cols],
+            df_plot,
             hue="outlier_status",
-            hue_order=["Normal", "Outlier"],  
-            palette=[self.normal_color, self.outlier_color],
-            plot_kws={"alpha": 0.6, "s": 10},
-            diag_kind="kde",
+            hue_order=["Normal", "Outlier"],       # normals drawn first, outliers on top
+            palette={"Normal": self.normal_color, "Outlier": self.outlier_color},
+            plot_kws={"alpha": 0.25, "s": 6, "edgecolor": "none", "linewidth": 0},
         )
-        g.fig.suptitle("Comprehensive Feature Pairplot", y=1.02, fontsize=16)
-        self._save_vectorized(g, "pairplot")
-
-        # if save_plots:
-        #     output_path = Path(self.figure_dir) if self.figure_dir else None
-        #     if output_path:
-        #         output_path.mkdir(parents=True, exist_ok=True)
-        #         logger.info("Saving comprehensive pairplot...")
-        #         g.savefig(
-        #             output_path / "comprehensive_pairplot.svg",
-        #             format="svg",
-        #             bbox_inches="tight",
-        #             facecolor="white",
-        #         )
-        #         plt.close(g)
-        #         logger.info(f"Saved plot: {output_path / 'comprehensive_pairplot.svg'}")
-        #     else:
-        #         plt.show()
-        # else:
-        #     plt.show()
-
-    def plots(self, df_density_scores, outlier_mask):
-        logger.info("Generating diagnostic plots...")
-        self.df_plot = self._norm_df()  # Call the method to get the DataFrame
-        self.outlier_summary(df_density_scores)
-        self.comprehensive_pairplot(outlier_mask)
-
-
-def _setup_dask(params):
-    """Setup Dask SGE cluster for distributed processing."""
-    try:
-        logger.info("Setting up distributed Dask cluster...")
-        cluster, client = setup_dask_sge_cluster(
-            n_workers=params.get("num_workers", 1),
-            cores=params.get("cpu_cores", 4),
-            processes=params.get("cpu_processes", 1),
-            memory=params.get("cpu_memory", "60G"),
-            project=params.get("project", "beliveaulab"),
-            queue=params.get("queue", "beliveau-long.q"),
-            runtime=params.get("runtime", "7200"),
-            resource_spec=params.get("cpu_resource_spec", "mfree=60G"),
-            log_directory=params.get("log_dir", None),
-            conda_env=params.get("conda_env", "otls-pipeline"),
-            dashboard_port=params.get("dashboard_port", None),
+        g.fig.suptitle(
+            f"Feature Pairplot — {n_out_true:,} outliers / {n_total:,} nuclei ({pct:.1f}%)",
+            y=1.02, fontsize=14,
         )
-        logger.info(f"Dask dashboard link: {client.dashboard_link}")
-        return cluster, client
-    except Exception as e:
-        logger.error(f"Failed to setup distributed cluster: {e}")
-        return None, None
+        self._save_fig(g.fig, "pairplot")
 
 
-def _shutdown_dask(cluster, client):
-    if cluster and client:
-        try:
-            shutdown_dask(cluster, client)
-            logger.info("Dask cluster shut down successfully")
-        except Exception as e:
-            logger.error(f"Error shutting down cluster: {e}")
-
+# ═══════════════════════════════════════════════════════════════════════════════
+# CLI
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="KDE Outlier Detection (Dask-parallel)")
+    parser = argparse.ArgumentParser(
+        description="Segmentation-error detection via robust Mahalanobis distance"
+    )
     parser.add_argument("--csv_path", type=str, required=True,
-                        help="CSV file with single cell data")
-    parser.add_argument("--figure_dir", type=str, required=True,
-                        help="Directory to store figures. Will be created if not exists")
-    parser.add_argument("--outlier_path", type=str, required=True,
-                        help="Where to store csv file of outliers")
-    parser.add_argument("--density_thresh", type=float, default=1e-15,
-                        help="Density threshold at which to consider an outlier")
-    parser.add_argument("--n_subsample", type=int, default=10000,
-                        help="Size of subsample in Monte Carlo subsampling")
-    parser.add_argument("--n_rounds", type=int, default=5,
-                        help="Num of rounds in KDE")
-    add_dask_args(parser)
+                        help="Feature table (CSV or Parquet)")
+    parser.add_argument("--figure_dir", type=str, required=True)
+    parser.add_argument("--outlier_path", type=str, required=True)
+    parser.add_argument("--alpha", type=float, default=0.001,
+                        help="Chi-squared significance level (default 0.001 = 99.9%%)")
+    parser.add_argument("--qc_nuclear_mask", type=str, default=None,
+                        help="Segmentation mask (.zarr/.n5) for QC figures.")
+    parser.add_argument("--qc_image_path", type=str, default=None,
+                        help="Microscopy image (.zarr/.n5) with ch<N>/s0 layout.")
+    parser.add_argument("--qc_channel", type=int, default=2)
+    parser.add_argument("--qc_n", type=int, default=16,
+                        help="Number of random outliers to crop for QC")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
     params = {
         "figure_dir": args.figure_dir,
-        "density_thresh": args.density_thresh,
         "csv_path": args.csv_path,
         "outlier_path": args.outlier_path,
-        "n_subsample": args.n_subsample,
-        "n_rounds": args.n_rounds,
+        "alpha": args.alpha,
+        "qc_nuclear_mask": args.qc_nuclear_mask,
+        "qc_image_path": args.qc_image_path,
+        "qc_channel": args.qc_channel,
+        "qc_n": args.qc_n,
     }
 
     logger.info("--------------------------------")
-    logger.info("Arguments read, starting analysis...")
+    logger.info("Starting outlier detection (Mahalanobis-only, alpha=%.4f)", args.alpha)
     logger.info("--------------------------------")
     start_time = time.time()
 
-    detector = KDEOutlierDetection(params)
-    cluster = client = None
-    try:
-        dask_params = dask_config_from_args(args)
-        cluster, client = _setup_dask(dask_params)
-        logger.info(f"Dask dashboard: {client.dashboard_link}")
-        detector.workflow(client)
+    detector = OutlierDetection(params)
+    detector.workflow()
 
-    finally:
-        _shutdown_dask(cluster, client)
-
-    end_time = time.time()
-    logger.info(f"Analysis completed in {end_time - start_time:.2f} seconds")
+    logger.info("Completed in %.2f seconds", time.time() - start_time)
 
 
 if __name__ == "__main__":

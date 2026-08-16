@@ -1,13 +1,18 @@
 numpy
 pandas
+polars
 zarr
 dask[array]
 matplotlib
 scipy
-
-[cluster]
+scikit-learn
+seaborn
+tifffile
+aicsshparam
+colorcet
 dask-jobqueue
 distributed
+KDEpy
 
 [dev]
 pytest
@@ -15,5 +20,6 @@ pytest
 [viz]
 pyvista
 plotly
-colorcet
-polars
+
+[workflow]
+snakemake
