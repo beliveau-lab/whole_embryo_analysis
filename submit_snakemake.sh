@@ -26,7 +26,7 @@ done
 # done: (300 306 324 308 309_retry 321_retry 312 299
 
 if [[ ${#RUNS[@]} -eq 0 ]]; then
-    RUNS=(300 306 324 308 309_retry 321_retry 312)
+    RUNS=(308)
 fi
 
 [[ -f "$JOB" ]] || { echo "ERROR: missing $JOB" >&2; exit 1; }
