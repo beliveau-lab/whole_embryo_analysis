@@ -13,7 +13,7 @@ conda activate /net/beliveau/vol1/home/msforman/.conda/envs/visualization
 echo "conda activated"
 
 # ── paths ───────────────────────────────────────────────────────────────────
-PROJ="$HOME/msf_project/whole_embryo_analysis2"
+PROJ="/net/beliveau/vol1/project/whole_embryo_analysis/whole_embryo_analysis"
 cd "$PROJ"
 
 RUN="${RUN:-306}"

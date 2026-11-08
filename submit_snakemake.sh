@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-PROJ="$HOME/msf_project/whole_embryo_analysis2"
+PROJ="/net/beliveau/vol1/project/whole_embryo_analysis/whole_embryo_analysis"
 JOB="$PROJ/job.sh"
 
 # Split args: run ids before --, snakemake passthrough after.
@@ -23,7 +23,7 @@ for arg in "$@"; do
     if [[ $seen_sep -eq 1 ]]; then EXTRA+=("$arg"); else RUNS+=("$arg"); fi
 done
 
-# done: (300 306 324 308 309_retry 321_retry 312 299
+# you can add multiple samples to RUNS by writing RUNS=(308 306) etc
 
 if [[ ${#RUNS[@]} -eq 0 ]]; then
     RUNS=(308)
